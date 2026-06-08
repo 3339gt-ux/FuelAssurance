@@ -19,7 +19,21 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className={`${inter.variable}`}>
-      <body className="font-sans antialiased bg-surface-100 text-surface-900">
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: `
+          (function() {
+            try {
+              const theme = localStorage.getItem('theme') || 'system';
+              if (theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+                document.documentElement.classList.add('dark');
+              } else {
+                document.documentElement.classList.remove('dark');
+              }
+            } catch (_) {}
+          })();
+        ` }} />
+      </head>
+      <body className="font-sans antialiased bg-surface-50 dark:bg-surface-0 text-surface-900 dark:text-surface-950">
         {children}
       </body>
     </html>

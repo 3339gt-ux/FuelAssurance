@@ -30,6 +30,7 @@ export interface DatabaseSchema {
   discounts: any[];
   review_decisions: any[];
   audit_events: any[];
+  simple_checks: any[];
 }
 
 export const DEFAULT_ORG_ID = 'd3b07384-d113-4956-a5b2-7c30d1d3d4b4';
@@ -96,6 +97,7 @@ const initialSchema: DatabaseSchema = {
   discounts: [],
   review_decisions: [],
   audit_events: [],
+  simple_checks: [],
 };
 
 class LocalDatabase {

@@ -55,6 +55,25 @@ type NavItem =
 export function Sidebar() {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
+  const [mode, setMode] = useState<'simple' | 'advanced'>('simple');
+
+  React.useEffect(() => {
+    const saved = localStorage.getItem('fuel-assurance-mode') as 'simple' | 'advanced';
+    if (saved) {
+      setMode(saved);
+    } else {
+      const defaultMode = process.env.NEXT_PUBLIC_FUEL_ASSURANCE_MODE || 'simple';
+      setMode(defaultMode as any);
+    }
+  }, []);
+
+  const activeNav = mode === 'simple' ? [
+    { name: 'Home', href: '/', icon: LayoutDashboard },
+    { name: 'DKV Check', href: '/dkv-check', icon: GitCompareArrows },
+    { name: 'AS24 Check', href: '/as24-check', icon: ClipboardCheck },
+    { name: 'Previous Results', href: '/previous-results', icon: History },
+    { name: 'Settings', href: '/settings', icon: Settings },
+  ] : navigation;
 
   return (
     <aside
@@ -78,7 +97,7 @@ export function Sidebar() {
 
       {/* Navigation */}
       <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
-        {(navigation as readonly NavItem[]).map((item, index) => {
+        {(activeNav as readonly NavItem[]).map((item, index) => {
           if ('divider' in item && item.divider) {
             if (collapsed) {
               return <div key={index} className="my-3 border-t border-surface-300" />;
@@ -95,7 +114,7 @@ export function Sidebar() {
           if (!item.href || !item.icon) return null;
 
           const Icon = item.icon;
-          const isActive = pathname === item.href || pathname?.startsWith(item.href + '/');
+          const isActive = pathname === item.href || (item.href !== '/' && pathname?.startsWith(item.href + '/'));
 
           return (
             <Link

@@ -7,6 +7,35 @@
 @layer base {
   :root {
     --radius: 0.5rem;
+    /* Light mode values (in RGB format for alpha values support) */
+    --surface-0: 255 255 255;
+    --surface-50: 248 249 250;
+    --surface-100: 241 243 245;
+    --surface-200: 233 236 239;
+    --surface-300: 222 226 230;
+    --surface-400: 206 212 218;
+    --surface-500: 173 181 189;
+    --surface-600: 108 117 125;
+    --surface-700: 73 80 87;
+    --surface-800: 52 58 64;
+    --surface-900: 33 37 41;
+    --surface-950: 26 29 32;
+  }
+
+  .dark {
+    /* Dark mode values (in RGB format for alpha values support) */
+    --surface-0: 10 10 15;
+    --surface-50: 17 17 24;
+    --surface-100: 24 24 31;
+    --surface-200: 31 31 40;
+    --surface-300: 42 42 53;
+    --surface-400: 53 53 66;
+    --surface-500: 69 69 90;
+    --surface-600: 107 107 128;
+    --surface-700: 144 144 160;
+    --surface-800: 176 176 192;
+    --surface-900: 208 208 220;
+    --surface-950: 234 234 240;
   }
 
   * {
