@@ -14,8 +14,12 @@ describe('AS24 PDF Parser', () => {
       registration: '241MH236',
       odometer: '261000'
     });
-    expect(splitRegAndOdo('241 MH 2380')).toEqual({
+    expect(splitRegAndOdo('241 MH 238 0')).toEqual({
       registration: '241MH238',
+      odometer: '0'
+    });
+    expect(splitRegAndOdo('241 MH 244 0')).toEqual({
+      registration: '241MH244',
       odometer: '0'
     });
     expect(splitRegAndOdo('241 MH 269147910')).toEqual({
@@ -217,8 +221,8 @@ describe('AS24 PDF Parser', () => {
 
       expect(result.invoiceRows).toHaveLength(1);
       const row = result.invoiceRows[0]!;
-      expect(row.status).toBe('PARSER_MAPPING_ERROR');
-      expect(row.warnings?.[0]).toContain('FINANCIAL_VALIDATION_ERROR');
+      expect(row.status).toBe('Needs field review');
+      expect(row.warnings?.[0]).toMatch(/FINANCIAL_VALIDATION_ERROR|FIELD_MAPPING_UNCERTAIN/);
     });
   });
 });

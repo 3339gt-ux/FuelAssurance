@@ -1,5 +1,6 @@
 import { getFleetVehicle, normalizeRegistration, isFleetVehicle } from '@/config/fleet-registry';
-import { scanDocumentForRegistrations, ScannedRegistration } from './document-scanner';
+import { scanDocumentForRegistrations } from './document-scanner';
+import { buildSimpleModeWarningSummary } from './warning-grouper';
 
 export interface VehicleSummary {
   registration: string;
@@ -37,6 +38,15 @@ export interface UploadSummary {
     transactionDateRange: string;
     totalTransactionRows: number;
     parsingWarnings: string[];
+    warningHeadline?: string;
+    informationalWarningCount?: number;
+    warningSummary?: {
+      blocking: Array<{ code: string; level: string; message: string; count: number }>;
+      review: Array<{ code: string; level: string; message: string; count: number }>;
+      informational: Array<{ code: string; level: string; message: string; count: number }>;
+      totalRaw: number;
+      totalGrouped: number;
+    };
   };
   fleetVehiclesFound: VehicleSummary[];
   chargeBreakdown: CategorySummary[];
@@ -78,15 +88,23 @@ export async function generateUploadSummary(
   parsingWarnings: string[],
   canonicalRows: any[]
 ): Promise<UploadSummary> {
-  // 1. Scan document for raw registrations
-  const scanResult = await scanDocumentForRegistrations(buffer, mimeType, fileName);
+  // 1. Section-aware registration scan — reuse parsed rows, never greedy-regex rescan for AS24
+  const scanResult = await scanDocumentForRegistrations(buffer, mimeType, fileName, {
+    provider,
+    canonicalRows,
+    skipFullScan: provider === 'AS24' || canonicalRows.length > 0,
+  });
 
-  // 2. Identify fleet vehicles and non-fleet vehicles
-  const nonFleetVehicles: NonFleetVehicleSummary[] = scanResult.nonFleetVehicles.map(v => ({
-    rawRegistration: v.raw,
-    normalizedRegistration: v.normalized,
-    source: v.source,
-  }));
+  const warningSummary = buildSimpleModeWarningSummary(parsingWarnings);
+
+  // 2. Non-fleet only when confidently extracted from recognised source fields
+  const nonFleetVehicles: NonFleetVehicleSummary[] = scanResult.nonFleetVehicles
+    .filter((v) => v.confident !== false)
+    .map((v) => ({
+      rawRegistration: v.raw,
+      normalizedRegistration: v.normalized,
+      source: v.source,
+    }));
 
   // 3. Process canonical rows to build vehicle summaries and charge breakdowns
   const vehicleMap = new Map<string, any>();
@@ -100,7 +118,7 @@ export async function generateUploadSummary(
     const date = row.transactionDate || '';
     if (date) allDates.push(date);
 
-    const amount = parseFloat(row.amountGross || row.baseValueGross || '0');
+    const amount = parseFloat(row.paymentAmountExVat || row.baseValueNet || row.amountGross || row.baseValueGross || '0');
     const currency = row.paymentCurrency || 'EUR';
     const quantity = parseFloat(row.quantity || '0');
     const country = row.serviceCountry || 'IE';
@@ -147,10 +165,13 @@ export async function generateUploadSummary(
     vSum.stations.add(station);
     vSum.chargeCategories.add(category);
 
-    // Fuel litres grouping
+    // Fuel litres grouping — skip toll/parking rows
     if (category === 'Diesel' || category === 'AdBlue' || category === 'GNR/red diesel') {
       const prodName = row.productName || category;
-      vSum.fuelLitresByProduct[prodName] = (vSum.fuelLitresByProduct[prodName] || 0) + quantity;
+      const vol = parseFloat(row.volume || row.quantity || '0');
+      if (!isNaN(vol) && vol > 0) {
+        vSum.fuelLitresByProduct[prodName] = (vSum.fuelLitresByProduct[prodName] || 0) + vol;
+      }
     }
 
     // Currency grouping
@@ -204,6 +225,14 @@ export async function generateUploadSummary(
     ? `${allDates[0]} to ${allDates[allDates.length - 1]}`
     : 'Unknown';
 
+  const displayWarnings = warningSummary.hasActionable
+    ? [
+        ...(warningSummary.headline ? [warningSummary.headline] : []),
+        ...warningSummary.grouped.blocking.map((g) => `${g.code}: ${g.message}${g.count > 1 ? ` (${g.count}×)` : ''}`),
+        ...warningSummary.grouped.review.map((g) => `${g.code}: ${g.message}${g.count > 1 ? ` (${g.count}×)` : ''}`),
+      ]
+    : [];
+
   return {
     fileOverview: {
       provider,
@@ -212,7 +241,10 @@ export async function generateUploadSummary(
       pageOrSheetCount,
       transactionDateRange: fileDateRange,
       totalTransactionRows: canonicalRows.length,
-      parsingWarnings,
+      parsingWarnings: displayWarnings,
+      warningSummary: warningSummary.grouped,
+      warningHeadline: warningSummary.headline,
+      informationalWarningCount: warningSummary.grouped.informational.reduce((s, g) => s + g.count, 0),
     },
     fleetVehiclesFound,
     chargeBreakdown,

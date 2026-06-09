@@ -49,6 +49,13 @@ export interface UploadSummaryShape {
     transactionDateRange: string;
     totalTransactionRows: number;
     parsingWarnings: string[];
+    warningHeadline?: string;
+    informationalWarningCount?: number;
+    warningSummary?: {
+      blocking: Array<{ code: string; message: string; count: number }>;
+      review: Array<{ code: string; message: string; count: number }>;
+      informational: Array<{ code: string; message: string; count: number }>;
+    };
   };
   fleetVehiclesFound: Array<{
     registration: string;

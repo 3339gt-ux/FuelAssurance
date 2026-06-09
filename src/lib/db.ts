@@ -106,6 +106,15 @@ const initialSchema: DatabaseSchema = {
 
 class LocalDatabase {
   private cache: DatabaseSchema | null = null;
+  private importFileByHash: Map<string, unknown> | null = null;
+
+  private buildIndexes(data: DatabaseSchema): void {
+    this.importFileByHash = new Map(
+      data.import_files
+        .filter((f: { file_hash?: string }) => f.file_hash)
+        .map((f: { file_hash: string }) => [f.file_hash, f])
+    );
+  }
 
   private read(): DatabaseSchema {
     if (this.cache) return this.cache;
@@ -113,6 +122,7 @@ class LocalDatabase {
     if (!fs.existsSync(DB_PATH)) {
       this.write(initialSchema);
       this.cache = initialSchema;
+      this.buildIndexes(initialSchema);
       return initialSchema;
     }
 
@@ -127,22 +137,33 @@ class LocalDatabase {
         }
       }
       this.cache = merged;
+      this.buildIndexes(merged);
       return merged;
     } catch (err) {
       console.error('Error reading local database, resetting to initial schema:', err);
       this.write(initialSchema);
       this.cache = initialSchema;
+      this.buildIndexes(initialSchema);
       return initialSchema;
     }
   }
 
   private write(data: DatabaseSchema): void {
     try {
-      fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2), 'utf8');
+      const tmpPath = `${DB_PATH}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify(data), 'utf8');
+      fs.renameSync(tmpPath, DB_PATH);
       this.cache = data;
+      this.buildIndexes(data);
     } catch (err) {
       console.error('Error writing to local database:', err);
     }
+  }
+
+  public findImportByHash(hash: string): unknown | null {
+    const data = this.read();
+    if (!this.importFileByHash) this.buildIndexes(data);
+    return this.importFileByHash?.get(hash) ?? null;
   }
 
   public getTable<T extends keyof DatabaseSchema>(table: T): DatabaseSchema[T] {
@@ -309,8 +330,7 @@ class LocalDatabase {
       created_at: new Date().toISOString(),
     };
     data.audit_events.push(event);
-    // Write directly, bypass local cache verification
-    fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2), 'utf8');
+    this.write(data);
   }
 }
 

@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import * as XLSX from 'xlsx';
 import pdf from 'pdf-parse';
 import { db, DEFAULT_USER_ID } from '@/lib/db';
-import { runFullPipeline } from '@/lib/pipeline';
+
 import { parseDKVTransactions } from '@/domain/parsers/dkv/dkv-transaction-parser';
 import { parseDKVInvoice } from '@/domain/parsers/dkv/dkv-invoice-parser';
 import { parseGPSFile } from '@/domain/parsers/gps/gps-parser';
@@ -11,6 +11,7 @@ import { parseStationWorkbook } from '@/domain/parsers/stations/station-parser';
 import { parseAS24PDF } from '@/domain/parsers/as24/as24-pdf-parser';
 import { generateUploadSummary, generateGpsSummary } from '@/lib/upload-summary';
 import type { UploadResponse } from '@/types/upload';
+import { getCachedParse, setCachedParse, CURRENT_PARSER_VERSION } from '@/lib/parse-cache';
 
 const IS_DEV = process.env.NODE_ENV !== 'production';
 
@@ -93,7 +94,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return stageError('file-read', 'HASH_FAILED', 'Could not compute file hash.', 'Try uploading again.', err);
   }
 
-  const existingFile = db.find('import_files', (f: any) => f.file_hash === hash);
+  const cached = getCachedParse(hash, CURRENT_PARSER_VERSION);
+  if (cached) {
+    return NextResponse.json({
+      success: true,
+      fileId: cached.fileId,
+      message: 'Parsed results loaded from cache',
+      alreadyImported: true,
+      provider: cached.provider,
+      documentType: cached.documentType,
+      uploadSummary: cached.uploadSummary as UploadResponse extends { uploadSummary?: infer U } ? U : never,
+      gpsSummary: cached.gpsSummary as UploadResponse extends { gpsSummary?: infer U } ? U : never,
+    } satisfies UploadResponse);
+  }
+
+  const existingFile = db.findImportByHash(hash) ?? db.find('import_files', (f: any) => f.file_hash === hash);
   if (existingFile) {
     // Re-build summaries from stored metadata so the UI always gets the full response
     const storedMeta = existingFile.metadata || {};
@@ -519,21 +534,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
   }
 
-  // ── Stage: pipeline ─────────────────────────────────────────────────────────
-  let pipelineResult: any = null;
-  try {
-    const pr = runFullPipeline();
-    if (pr) {
-      pipelineResult = {
-        runId: pr.run.id,
-        matchedCount: pr.run.matched_count,
-        matchRate: pr.run.match_rate,
-        alignment: pr.alignment,
-      };
-    }
-  } catch {
-    // Non-fatal
-  }
+  setCachedParse({
+    fileHash: hash,
+    parserVersion: parserVersion || CURRENT_PARSER_VERSION,
+    provider,
+    documentType,
+    fileId,
+    rowCount,
+    pageCount,
+    warnings,
+    uploadSummary,
+    gpsSummary,
+    cachedAt: new Date().toISOString(),
+  });
 
   // ── Stage: response ─────────────────────────────────────────────────────────
   return NextResponse.json({
@@ -546,7 +559,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     uploadSummary,
     gpsSummary,
     ...(summaryWarning ? { summaryWarning } : {}),
-    pipelineResult,
     // Legacy fields for backward compatibility during transition
     importFile,
   } satisfies UploadResponse);

@@ -8,6 +8,9 @@ import {
 } from 'lucide-react';
 import { useDropzone } from 'react-dropzone';
 import type { UploadResponse, UploadSummaryShape, GpsSummaryShape } from '@/types/upload';
+import { FleetVehicleTable } from '@/components/simple/FleetVehicleTable';
+import { WarningSummaryPanel } from '@/components/simple/WarningSummaryPanel';
+import { FLEET_VEHICLES } from '@/config/fleet-registry';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Inline error panel — replaces all alert() calls
@@ -70,7 +73,10 @@ export default function AS24CheckPage() {
   const router = useRouter();
   const [step, setStep] = useState(1);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [processingStage, setProcessingStage] = useState('');
+  const [processingStale, setProcessingStale] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const abortRef = React.useRef<AbortController | null>(null);
 
   // Step 1: AS24 PDF
   const [pdfFile, setPdfFile] = useState<File | null>(null);
@@ -87,7 +93,15 @@ export default function AS24CheckPage() {
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
+  const cancelProcessing = () => {
+    abortRef.current?.abort();
+    setIsProcessing(false);
+    setProcessingStage('');
+    setProcessingStale(false);
+  };
+
   const resetPdf = () => {
+    cancelProcessing();
     setPdfFile(null);
     setUploadSummary(null);
     setPdfError(null);
@@ -111,13 +125,20 @@ export default function AS24CheckPage() {
       setPdfFile(file);
       setPdfError(null);
       setIsProcessing(true);
+      setProcessingStage('Uploading file…');
+      setProcessingStale(false);
+      abortRef.current?.abort();
+      abortRef.current = new AbortController();
+      const staleTimer = setTimeout(() => setProcessingStale(true), 15000);
+      const hardTimer = setTimeout(() => abortRef.current?.abort(), 120000);
 
       const formData = new FormData();
       formData.append('file', file);
       formData.append('type', 'AS24 Invoice (PDF)');
 
       try {
-        const res = await fetch('/api/upload', { method: 'POST', body: formData });
+        setProcessingStage('Parsing transaction rows…');
+        const res = await fetch('/api/upload', { method: 'POST', body: formData, signal: abortRef.current.signal });
         const data: UploadResponse = await res.json();
 
         if ('success' in data && data.success && data.uploadSummary) {
@@ -158,17 +179,26 @@ export default function AS24CheckPage() {
           setPdfFile(null);
         }
       } catch (err) {
+        const aborted = err instanceof DOMException && err.name === 'AbortError';
         setPdfError({
           fileName: file.name,
           fileType: 'AS24 Invoice (PDF)',
-          stage: 'file-read',
-          message: 'The upload request failed — the server may be unreachable.',
-          suggestedAction: 'Check that the development server is running on port 3993 and try again.',
+          stage: aborted ? 'timeout' : 'file-read',
+          message: aborted
+            ? 'Processing timed out or was cancelled.'
+            : 'The upload request failed — the server may be unreachable.',
+          suggestedAction: aborted
+            ? 'Try again with a smaller file or check server logs. You can retry without refreshing.'
+            : 'Check that the development server is running on port 3993 and try again.',
           onRetry: resetPdf,
         });
-        setPdfFile(null);
+        if (aborted) setPdfFile(null);
       } finally {
+        clearTimeout(staleTimer);
+        clearTimeout(hardTimer);
         setIsProcessing(false);
+        setProcessingStage('');
+        setProcessingStale(false);
       }
     },
   });
@@ -322,8 +352,11 @@ export default function AS24CheckPage() {
       {isProcessing && (
         <div className="card flex flex-col items-center justify-center py-16 space-y-3">
           <Loader2 className="h-8 w-8 text-brand-600 animate-spin" />
-          <p className="text-xs text-slate-500">Processing and parsing file content…</p>
-          <p className="text-3xs text-slate-400">This may take a few seconds for large files</p>
+          <p className="text-xs text-surface-700 dark:text-surface-800">{processingStage || 'Processing and parsing file content…'}</p>
+          {processingStale && (
+            <p className="text-3xs text-amber-700 dark:text-amber-400">Processing is taking longer than expected</p>
+          )}
+          <button type="button" onClick={cancelProcessing} className="btn btn-secondary text-3xs py-2 px-4 mt-2">Cancel</button>
         </div>
       )}
 
@@ -374,53 +407,22 @@ export default function AS24CheckPage() {
                     ))}
                   </div>
 
-                  {uploadSummary.fileOverview.parsingWarnings.length > 0 && (
-                    <div className="flex gap-2.5 p-3.5 bg-amber-500/10 border border-amber-300 rounded-xl text-amber-700 text-xs">
-                      <AlertTriangle className="h-4.5 w-4.5 shrink-0 mt-0.5" />
-                      <div>
-                        <p className="font-bold">Parsing Warnings Detected</p>
-                        <ul className="list-disc pl-4 mt-1 space-y-1">
-                          {uploadSummary.fileOverview.parsingWarnings.map((w, i) => <li key={i}>{w}</li>)}
-                        </ul>
-                      </div>
-                    </div>
-                  )}
+                  <WarningSummaryPanel
+                    headline={uploadSummary.fileOverview.warningHeadline}
+                    blocking={uploadSummary.fileOverview.warningSummary?.blocking as any}
+                    review={uploadSummary.fileOverview.warningSummary?.review as any}
+                    informational={uploadSummary.fileOverview.warningSummary?.informational as any}
+                    informationalCount={uploadSummary.fileOverview.informationalWarningCount}
+                    rawWarnings={uploadSummary.fileOverview.parsingWarnings}
+                  />
 
-                  {/* Fleet Vehicles Found */}
                   {uploadSummary.fleetVehiclesFound.length > 0 && (
                     <div className="space-y-3">
-                      <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Fleet Vehicles Identified</h4>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        {uploadSummary.fleetVehiclesFound.map((v, idx) => (
-                          <div key={idx} className="card p-4 space-y-3 border-l-4 border-l-brand-600">
-                            <div className="flex justify-between items-start">
-                              <div>
-                                <span className="text-xs font-black font-mono tracking-tight bg-slate-100 dark:bg-surface-200 px-2 py-0.5 rounded text-slate-800 dark:text-surface-950">{v.registration}</span>
-                                <p className="text-3xs text-slate-400 mt-1">{v.make} {v.model}</p>
-                              </div>
-                              <span className="badge bg-brand-500/10 text-brand-600 text-3xs font-semibold">{v.chargeCount} charges</span>
-                            </div>
-                            <div className="grid grid-cols-2 gap-y-2 gap-x-4 text-3xs text-slate-500">
-                              <div>
-                                <span className="block text-4xs font-bold text-slate-400 uppercase">Litres</span>
-                                <span className="text-slate-800 font-medium">
-                                  {Object.entries(v.fuelLitresByProduct).map(([prod, lit]) => `${lit}L (${prod})`).join(', ') || '0L'}
-                                </span>
-                              </div>
-                              <div>
-                                <span className="block text-4xs font-bold text-slate-400 uppercase">Monetary Total</span>
-                                <span className="text-slate-800 font-bold font-mono">
-                                  {Object.entries(v.monetaryTotalsByCurrency).map(([curr, amt]: any) => `${curr} ${amt.toFixed(2)}`).join(', ')}
-                                </span>
-                              </div>
-                              <div className="col-span-2">
-                                <span className="block text-4xs font-bold text-slate-400 uppercase">Countries / Regions</span>
-                                <span className="text-slate-700 truncate block">{v.countries.join(', ')} ({v.stations.length} stations)</span>
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
+                      <h4 className="text-xs font-bold text-surface-600 uppercase tracking-wider">Fleet Vehicles Identified</h4>
+                      <FleetVehicleTable
+                        vehicles={uploadSummary.fleetVehiclesFound}
+                        allFleetRegistrations={FLEET_VEHICLES.map((v) => v.registration)}
+                      />
                     </div>
                   )}
 

@@ -21,6 +21,13 @@ import {
   type FinancialFieldMetadata,
 } from '@/domain/types';
 import { generateId, normaliseCardNumber, normaliseStationCode } from '@/lib/utils';
+import {
+  parseCardsFillingRegistration,
+  parsePassangoRegistration,
+  splitRegAndOdo,
+} from '@/domain/parsers/as24/registration-extractor';
+
+export { splitRegAndOdo };
 
 export interface PdfItem {
   str: string;
@@ -46,61 +53,7 @@ function parseTimeStr(str: string): string {
   return m ? `${m[1]}:${m[2]}` : '';
 }
 
-/**
- * Split a concatenated registration + odometer string using domain-specific rules.
- */
-export function splitRegAndOdo(raw: string): { registration: string; odometer: string } {
-  const cleaned = raw.trim();
-
-  // Try 241 pattern: 241 MH \d{3} followed by odometer (all 241s in sample are 3-digit sequence)
-  const m241 = cleaned.match(/^(241\s*MH\s*(\d{3}))(\d*)$/i);
-  if (m241) {
-    const reg = m241[1];
-    const odo = m241[3];
-    return {
-      registration: reg ? reg.replace(/\s+/g, '') : '',
-      odometer: odo || '0',
-    };
-  }
-
-  // Try 252 pattern:
-  // - 4 digits if starts with 1: 252 MH 1\d{3}
-  // - 3 digits if starts with 7 or 8: 252 MH [78]\d{2}
-  const m252_1 = cleaned.match(/^(252\s*MH\s*(1\d{3}))(\d*)$/i);
-  if (m252_1) {
-    const reg = m252_1[1];
-    const odo = m252_1[3];
-    return {
-      registration: reg ? reg.replace(/\s+/g, '') : '',
-      odometer: odo || '0',
-    };
-  }
-
-  const m252_78 = cleaned.match(/^(252\s*MH\s*([78]\d{2}))(\d*)$/i);
-  if (m252_78) {
-    const reg = m252_78[1];
-    const odo = m252_78[3];
-    return {
-      registration: reg ? reg.replace(/\s+/g, '') : '',
-      odometer: odo || '0',
-    };
-  }
-
-  // Fallback
-  const digitsOnly = cleaned.replace(/\D/g, '');
-  if (digitsOnly.length > 8) {
-    const odoLen = digitsOnly.length - 8;
-    return {
-      registration: cleaned.slice(0, -odoLen).replace(/\s+/g, ''),
-      odometer: cleaned.slice(-odoLen),
-    };
-  }
-
-  return {
-    registration: cleaned.replace(/\s+/g, ''),
-    odometer: '0',
-  };
-}
+export type FinancialValidationLevel = 'blocking' | 'review' | 'informational';
 
 /**
  * Extract 7 numbers from the right side of a string representing card filling transaction details.
@@ -263,51 +216,93 @@ export function validateAndRemapVolume(
   };
 }
 
+function parseMoney(value: string): number | null {
+  const cleaned = value.replace(/[\s\xA0,]+/g, '');
+  if (!cleaned || /\d+\.\d+.*\d+\.\d+/.test(cleaned)) return null;
+  const n = parseFloat(cleaned);
+  return isNaN(n) || !isFinite(n) ? null : n;
+}
+
 /**
- * Validate Net and Gross financials and make sure they are not concatenated.
+ * Product-aware financial validation with separated payment fields.
  */
 export function validateFinancials(
   exVat: string,
   inclVat: string,
-  currency: string
+  productType: ProductType,
+  options?: { vatAmount?: string; allowZeroNet?: boolean }
 ): {
   status: string;
   warnings: string[];
 } {
-  const net = parseFloat(exVat.replace(/[\s,]+/g, ''));
-  const gross = parseFloat(inclVat.replace(/[\s,]+/g, ''));
+  const net = parseMoney(exVat);
+  const gross = parseMoney(inclVat);
+  const isToll = productType === ProductType.TOLL;
+  const isService = productType === ProductType.PARKING || productType === ProductType.UNKNOWN;
+  const allowZeroNet = options?.allowZeroNet ?? isToll;
 
-  if (isNaN(net) || !isFinite(net) || net <= 0) {
+  if (net === null || gross === null) {
     return {
-      status: 'PARSER_MAPPING_ERROR',
-      warnings: [`FINANCIAL_VALIDATION_ERROR: Payment amount ex VAT "${exVat}" is invalid or non-positive.`],
-    };
-  }
-
-  if (isNaN(gross) || !isFinite(gross) || gross <= 0) {
-    return {
-      status: 'PARSER_MAPPING_ERROR',
-      warnings: [`FINANCIAL_VALIDATION_ERROR: Payment amount incl VAT "${inclVat}" is invalid or non-positive.`],
-    };
-  }
-
-  // Plausible VAT rates are 0% to 30%. Net to Gross ratio should be between 1.0 and 1.35.
-  const ratio = gross / net;
-  if (ratio < 0.95 || ratio > 1.35) {
-    return {
-      status: 'PARSER_MAPPING_ERROR',
+      status: 'Needs field review',
       warnings: [
-        `FINANCIAL_VALIDATION_ERROR: Plausibility ratio check failed. ` +
-        `Gross/Net ratio is ${ratio.toFixed(3)} (outside standard 1.0 to 1.35 range). ` +
-        `exVAT: ${exVat}, inclVAT: ${inclVat}.`
+        `FIELD_MAPPING_UNCERTAIN: Payment amounts could not be separated cleanly (ex VAT: "${exVat}", incl VAT: "${inclVat}").`,
       ],
     };
   }
 
-  return {
-    status: 'OK',
-    warnings: [],
-  };
+  if (net <= 0 && allowZeroNet && gross > 0) {
+    return {
+      status: 'OK',
+      warnings: [
+        `TOLL_NET_NOT_PROVIDED: Provider did not populate a separate payment net value for this toll row.`,
+      ],
+    };
+  }
+
+  if (net <= 0 && gross <= 0) {
+    if (isToll || isService) {
+      return { status: 'OK', warnings: [] };
+    }
+    return {
+      status: 'Needs field review',
+      warnings: [`FINANCIAL_VALIDATION_ERROR: Payment amount ex VAT "${exVat}" is invalid or non-positive.`],
+    };
+  }
+
+  if (gross <= 0) {
+    return {
+      status: 'Needs field review',
+      warnings: [`FINANCIAL_VALIDATION_ERROR: Payment amount incl VAT "${inclVat}" is invalid or non-positive.`],
+    };
+  }
+
+  if (net <= 0) {
+    return {
+      status: 'Needs field review',
+      warnings: [`FINANCIAL_VALIDATION_ERROR: Payment amount ex VAT "${exVat}" is invalid or non-positive.`],
+    };
+  }
+
+  const ratio = gross / net;
+  if (ratio < 0.95 || ratio > 1.35) {
+    const vat = options?.vatAmount ? parseMoney(options.vatAmount) : null;
+    if (vat !== null && Math.abs(gross - net - vat) < 0.05) {
+      return {
+        status: 'Needs field review',
+        warnings: [
+          `FIELD_MAPPING_UNCERTAIN: Gross/net ratio check skipped — VAT field appears separate (VAT: ${options?.vatAmount}, ex VAT: ${exVat}, incl VAT: ${inclVat}).`,
+        ],
+      };
+    }
+    return {
+      status: 'Needs field review',
+      warnings: [
+        `FINANCIAL_VALIDATION_ERROR: Plausibility ratio check failed. Gross/Net ratio is ${ratio.toFixed(3)} (outside 1.0 to 1.35). ex VAT: ${exVat}, incl VAT: ${inclVat}.`,
+      ],
+    };
+  }
+
+  return { status: 'OK', warnings: [] };
 }
 
 /**
@@ -494,13 +489,13 @@ export function parseCardFillingListFallback(text: string, fileId: string): Cano
       continue;
     }
 
-    const cardHeaderMatch = line.match(/^\s*\*\s*([\d\-]+)\s+(IE-\s*)?([0-9]{3}\s*[A-Z]{1,2}\s*[0-9]+.*)$/i);
+    const cardHeaderMatch = line.match(/^\s*\*\s*([\d\-]+)\s+(.+)$/i);
     if (cardHeaderMatch) {
       currentCard = (cardHeaderMatch[1] || '').trim();
-      const rawRegOdo = (cardHeaderMatch[3] || '').trim();
-      const parsedReg = splitRegAndOdo(rawRegOdo);
+      const rawRegPart = (cardHeaderMatch[2] || '').trim();
+      const parsedReg = parseCardsFillingRegistration(rawRegPart);
       currentReg = parsedReg.registration;
-      currentOdometer = parsedReg.odometer;
+      currentOdometer = parsedReg.odometer !== '0' ? parsedReg.odometer : parsedReg.followingField;
       continue;
     }
 
@@ -566,8 +561,12 @@ export function parseCardFillingListFallback(text: string, fileId: string): Cano
     const productType = detectProductType(productCode, productName);
 
     // Run physical & financial validations in fallback
-    const volVal = validateAndRemapVolume(quantity, mileage, '0');
-    const finVal = validateFinancials(rightNums.amountExVat, rightNums.amountInclVat, 'EUR');
+    const volVal = productType === ProductType.TOLL || productType === ProductType.PARKING
+      ? { volume: quantity, status: 'OK', warnings: [] as string[] }
+      : validateAndRemapVolume(quantity, mileage, '0');
+    const finVal = validateFinancials(rightNums.amountExVat, rightNums.amountInclVat, productType, {
+      vatAmount: rightNums.vat,
+    });
 
     const warningList = [
       'COORDINATES_UNAVAILABLE: Page parsed using fallback string match parser. Field boundaries are uncertain.',
@@ -705,20 +704,15 @@ export function parsePASSangoSectionFallback(text: string, fileId: string): Cano
       continue;
     }
 
-    const regMatch = line.match(/^\s*(IE-\s*(?:241MH\d{3}|252MH(?:1\d{3}|[78]\d{2})))/i);
+    const passangoHeader = parsePassangoRegistration(line);
     const startsWithDate = line.match(/^\s*(\d{2}\/\d{2}\/\d{4})/);
 
-    if (regMatch) {
-      const regVal = regMatch[1];
-      if (regVal) {
-        currentReg = regVal.replace(/\s+/g, '');
-        const rest = line.slice(line.indexOf(regVal) + regVal.length).trim();
-        const obuMatch = rest.match(/^(\d{10})/);
-        currentObuId = obuMatch ? obuMatch[1] || '' : '';
-      }
+    if (passangoHeader) {
+      currentReg = passangoHeader.registration;
+      currentObuId = passangoHeader.obuId;
     }
 
-    if (regMatch || startsWithDate) {
+    if (passangoHeader || startsWithDate) {
       const dateMatch = line.match(/(\d{2}\/\d{2}\/\d{4})/);
       if (!dateMatch || dateMatch.index === undefined) continue;
 
@@ -770,13 +764,13 @@ export function parsePASSangoSectionFallback(text: string, fileId: string): Cano
       const netAmount = parts[1] || '0';
       const grossAmount = parts[0] || '0';
 
-      const finVal = validateFinancials(netAmount, grossAmount, 'EUR');
+      const finVal = validateFinancials(netAmount, grossAmount, ProductType.TOLL, { allowZeroNet: true });
 
       rows.push({
         id: generateId(),
         importFileId: fileId,
         importRowIndex: i,
-        registration: currentReg.replace(/^IE-/, ''),
+        registration: currentReg,
         cardNumber: currentObuId,
         cardNumberNormalised: normaliseCardNumber(currentObuId),
         equipmentNumber: '',
@@ -928,13 +922,13 @@ function parseAS24PDFCoordinate(
 
         // Check if Card Header row
         // e.g. " * 0151-0 252MH1717"
-        const cardHeaderMatch = (cols[0] ?? '').match(/^\s*\*\s*([\d\-]+)\s+(?:IE-\s*)?([A-Z0-9\s]+)$/i);
+        const cardHeaderMatch = (cols[0] ?? '').match(/^\s*\*\s*([\d\-]+)\s+(.+)$/i);
         if (cardHeaderMatch) {
           currentCard = cardHeaderMatch[1]?.trim() ?? '';
-          const regOdo = cardHeaderMatch[2]?.trim() ?? '';
-          const parsedRegOdo = splitRegAndOdo(regOdo);
-          currentReg = parsedRegOdo.registration;
-          currentCardOdometer = (cols[5] ?? '').trim() || parsedRegOdo.odometer || '0';
+          const regPart = cardHeaderMatch[2]?.trim() ?? '';
+          const parsedReg = parseCardsFillingRegistration(regPart);
+          currentReg = parsedReg.registration;
+          currentCardOdometer = (cols[5] ?? '').trim() || (parsedReg.odometer !== '0' ? parsedReg.odometer : parsedReg.followingField) || '0';
           continue;
         }
 
@@ -978,12 +972,16 @@ function parseAS24PDFCoordinate(
         const mileageKm = (cols[5] ?? '').trim() || currentCardOdometer;
 
         // Perform hard validations
-        const volumeVal = validateAndRemapVolume(cols[7] ?? '', mileageKm, cols[6] ?? '');
-        const finVal = validateFinancials(cols[14] ?? '', cols[15] ?? '', 'EUR');
+        const volumeVal = productType === ProductType.TOLL || productType === ProductType.PARKING
+          ? { volume: cols[7] ?? '0', status: 'OK', warnings: [] as string[] }
+          : validateAndRemapVolume(cols[7] ?? '', mileageKm, cols[6] ?? '');
+        const finVal = validateFinancials(cols[14] ?? '', cols[15] ?? '', productType, {
+          vatAmount: cols[13] ?? '',
+        });
 
         const finalStatus = volumeVal.status === 'PARSER_MAPPING_ERROR' || finVal.status === 'PARSER_MAPPING_ERROR'
           ? 'PARSER_MAPPING_ERROR'
-          : (volumeVal.status === 'Needs field review' ? 'Needs field review' : 'OK');
+          : (volumeVal.status === 'Needs field review' || finVal.status === 'Needs field review' ? 'Needs field review' : 'OK');
 
         const extractionConfidence = finalStatus === 'PARSER_MAPPING_ERROR' ? 30 : (finalStatus === 'Needs field review' ? 70 : 100);
 
@@ -1114,10 +1112,11 @@ function parseAS24PDFCoordinate(
         }
 
         // Vehicle / OBU header (often combined with the first toll row)
-        if ((cols[0] ?? '').trim().startsWith('IE-')) {
-          const regVal = (cols[0] ?? '').trim().replace(/\s+/g, '');
-          currentReg = regVal.replace(/^IE-/, '');
-          currentObuId = (cols[2] ?? '').trim().replace(/\s+/g, '');
+        const rowCombined = row.map((i) => i.str).join(' ');
+        const passangoHeader = parsePassangoRegistration(rowCombined);
+        if (passangoHeader) {
+          currentReg = passangoHeader.registration;
+          currentObuId = passangoHeader.obuId || (cols[2] ?? '').trim().replace(/\s+/g, '');
         }
 
         const dateVal = (cols[4] ?? '').trim();
@@ -1131,7 +1130,7 @@ function parseAS24PDFCoordinate(
         const netAmount = (cols[8] ?? '').trim();
         const grossAmount = (cols[9] ?? '').trim();
 
-        const finVal = validateFinancials(netAmount, grossAmount, 'EUR');
+        const finVal = validateFinancials(netAmount, grossAmount, ProductType.TOLL, { allowZeroNet: true });
 
         rows.push({
           id: generateId(),

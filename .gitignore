@@ -35,6 +35,9 @@ Thumbs.db
 *.tsbuildinfo
 next-env.d.ts
 
+# Local persistence — NEVER commit
+local_db.json
+
 # Sample / real data files — NEVER commit
 Sample Files/
 inspect_tmp/
