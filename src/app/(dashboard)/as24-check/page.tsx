@@ -1,5 +1,5 @@
 'use client';
-import React, { useState } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Upload, ChevronRight, AlertTriangle, CheckCircle2, FileText, ArrowRight,
@@ -113,95 +113,104 @@ export default function AS24CheckPage() {
     setGpsError(null);
   };
 
+  const processPdfUpload = useCallback(async (file: File) => {
+    setPdfFile(file);
+    setPdfError(null);
+    setIsProcessing(true);
+    setProcessingStage('Uploading file…');
+    setProcessingStale(false);
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
+    const staleTimer = setTimeout(() => setProcessingStale(true), 15000);
+    const hardTimer = setTimeout(() => abortRef.current?.abort(), 120000);
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('type', 'AS24 Invoice (PDF)');
+
+    try {
+      setProcessingStage('Parsing transaction rows…');
+      const res = await fetch('/api/upload', { method: 'POST', body: formData, signal: abortRef.current.signal });
+      const data: UploadResponse = await res.json();
+
+      if ('success' in data && data.success && data.uploadSummary) {
+        setUploadSummary({ fileId: data.fileId, ...data.uploadSummary });
+      } else if ('success' in data && data.success && !data.uploadSummary) {
+        setPdfError({
+          fileName: file.name,
+          fileType: 'AS24 Invoice (PDF)',
+          stage: 'summary-generation',
+          message: data.summaryWarning || 'The file was imported but the upload summary could not be generated.',
+          suggestedAction: 'The import succeeded. You can still view this batch in Transaction Batches. Try re-uploading if you need the full summary.',
+          onRetry: resetPdf,
+        });
+      } else if ('success' in data && !data.success) {
+        setPdfError({
+          fileName: file.name,
+          fileType: 'AS24 Invoice (PDF)',
+          stage: data.stage,
+          message: data.message,
+          suggestedAction: data.suggestedAction,
+          onRetry: resetPdf,
+        });
+        setPdfFile(null);
+      } else {
+        setPdfError({
+          fileName: file.name,
+          fileType: 'AS24 Invoice (PDF)',
+          stage: 'response',
+          message: 'The server returned an unexpected response.',
+          suggestedAction: 'Try uploading again. If the problem persists, check the server logs.',
+          onRetry: resetPdf,
+        });
+        setPdfFile(null);
+      }
+    } catch (err) {
+      const aborted = err instanceof DOMException && err.name === 'AbortError';
+      setPdfError({
+        fileName: file.name,
+        fileType: 'AS24 Invoice (PDF)',
+        stage: aborted ? 'timeout' : 'file-read',
+        message: aborted
+          ? 'Processing timed out or was cancelled.'
+          : 'The upload request failed — the server may be unreachable.',
+        suggestedAction: aborted
+          ? 'Try again with a smaller file or check server logs. You can retry without refreshing.'
+          : 'Check that the development server is running on port 3993 and try again.',
+        onRetry: resetPdf,
+      });
+      if (aborted) setPdfFile(null);
+    } finally {
+      clearTimeout(staleTimer);
+      clearTimeout(hardTimer);
+      setIsProcessing(false);
+      setProcessingStage('');
+      setProcessingStale(false);
+    }
+  }, [resetPdf]);
+
   // ── Dropzone: AS24 PDF ─────────────────────────────────────────────────────
 
   const { getRootProps: getPdfProps, getInputProps: getPdfInput, isDragActive: pdfActive } = useDropzone({
     accept: { 'application/pdf': ['.pdf'] },
     multiple: false,
     disabled: isProcessing,
-    onDrop: async (accepted) => {
+    onDrop: (accepted) => {
       const file = accepted[0];
-      if (!file) return;
-      setPdfFile(file);
-      setPdfError(null);
-      setIsProcessing(true);
-      setProcessingStage('Uploading file…');
-      setProcessingStale(false);
-      abortRef.current?.abort();
-      abortRef.current = new AbortController();
-      const staleTimer = setTimeout(() => setProcessingStale(true), 15000);
-      const hardTimer = setTimeout(() => abortRef.current?.abort(), 120000);
-
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('type', 'AS24 Invoice (PDF)');
-
-      try {
-        setProcessingStage('Parsing transaction rows…');
-        const res = await fetch('/api/upload', { method: 'POST', body: formData, signal: abortRef.current.signal });
-        const data: UploadResponse = await res.json();
-
-        if ('success' in data && data.success && data.uploadSummary) {
-          setUploadSummary({ fileId: data.fileId, ...data.uploadSummary });
-          if (data.alreadyImported) {
-            // File was already in DB — still proceed but note it
-          }
-        } else if ('success' in data && data.success && !data.uploadSummary) {
-          // Core import succeeded but summary failed
-          setPdfError({
-            fileName: file.name,
-            fileType: 'AS24 Invoice (PDF)',
-            stage: 'summary-generation',
-            message: data.summaryWarning || 'The file was imported but the upload summary could not be generated.',
-            suggestedAction: 'The import succeeded. You can still view this batch in Transaction Batches. Try re-uploading if you need the full summary.',
-            onRetry: resetPdf,
-          });
-        } else if ('success' in data && !data.success) {
-          setPdfError({
-            fileName: file.name,
-            fileType: 'AS24 Invoice (PDF)',
-            stage: data.stage,
-            message: data.message,
-            suggestedAction: data.suggestedAction,
-            onRetry: resetPdf,
-          });
-          setPdfFile(null);
-        } else {
-          // Unexpected shape
-          setPdfError({
-            fileName: file.name,
-            fileType: 'AS24 Invoice (PDF)',
-            stage: 'response',
-            message: 'The server returned an unexpected response.',
-            suggestedAction: 'Try uploading again. If the problem persists, check the server logs.',
-            onRetry: resetPdf,
-          });
-          setPdfFile(null);
-        }
-      } catch (err) {
-        const aborted = err instanceof DOMException && err.name === 'AbortError';
-        setPdfError({
-          fileName: file.name,
-          fileType: 'AS24 Invoice (PDF)',
-          stage: aborted ? 'timeout' : 'file-read',
-          message: aborted
-            ? 'Processing timed out or was cancelled.'
-            : 'The upload request failed — the server may be unreachable.',
-          suggestedAction: aborted
-            ? 'Try again with a smaller file or check server logs. You can retry without refreshing.'
-            : 'Check that the development server is running on port 3993 and try again.',
-          onRetry: resetPdf,
-        });
-        if (aborted) setPdfFile(null);
-      } finally {
-        clearTimeout(staleTimer);
-        clearTimeout(hardTimer);
-        setIsProcessing(false);
-        setProcessingStage('');
-        setProcessingStale(false);
-      }
+      if (file) void processPdfUpload(file);
     },
   });
+
+  const { onChange: _pdfDropzoneOnChange, ...pdfInputProps } = getPdfInput();
+
+  useEffect(() => {
+    if (process.env.NEXT_PUBLIC_E2E_HOOKS === 'true') {
+      (window as unknown as { __testUploadAs24Pdf?: (f: File) => Promise<void> }).__testUploadAs24Pdf = processPdfUpload;
+    }
+    return () => {
+      delete (window as unknown as { __testUploadAs24Pdf?: (f: File) => Promise<void> }).__testUploadAs24Pdf;
+    };
+  }, [processPdfUpload]);
 
   // ── Dropzone: GPS ──────────────────────────────────────────────────────────
 
@@ -374,7 +383,14 @@ export default function AS24CheckPage() {
                 <div {...getPdfProps()} className={`card border-2 border-dashed flex flex-col items-center justify-center py-20 text-center cursor-pointer transition ${
                   pdfActive ? 'border-brand-500 bg-brand-500/5' : 'border-slate-350 dark:border-surface-300 hover:bg-slate-50 dark:hover:bg-surface-50'
                 }`}>
-                  <input {...getPdfInput()} />
+                  <input
+                    {...pdfInputProps}
+                    data-testid="as24-pdf-upload"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) void processPdfUpload(file);
+                    }}
+                  />
                   <Upload className="h-10 w-10 text-slate-400 mb-3" />
                   <p className="text-sm font-bold text-slate-800 dark:text-surface-950">Drag and drop AS24 PDF invoice here</p>
                   <p className="text-2xs text-slate-400 mt-1">Supports PDF document format</p>

@@ -1,5 +1,5 @@
 'use client';
-import React, { useState } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Upload, ChevronRight, AlertTriangle, CheckCircle2, FileText, ArrowRight,
@@ -86,6 +86,57 @@ export default function DKVCheckPage() {
   const resetDkv = () => { setDkvFile(null); setUploadSummary(null); setDkvError(null); };
   const resetGps = () => { setGpsFile(null); setGpsSummary(null); setGpsError(null); };
 
+  const processDkvUpload = useCallback(async (file: File) => {
+    setDkvFile(file);
+    setDkvError(null);
+    setIsProcessing(true);
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('type', file.name.toLowerCase().includes('invoice') ? 'DKV Invoice' : 'DKV Transactions');
+
+    try {
+      const res = await fetch('/api/upload', { method: 'POST', body: formData });
+      const data: UploadResponse = await res.json();
+
+      if ('success' in data && data.success && data.uploadSummary) {
+        setUploadSummary({ fileId: data.fileId, ...data.uploadSummary });
+      } else if ('success' in data && data.success && !data.uploadSummary) {
+        setDkvError({
+          fileName: file.name,
+          fileType: 'DKV File',
+          stage: 'summary-generation',
+          message: data.summaryWarning || 'The file was imported but the upload summary could not be generated.',
+          suggestedAction: 'The core import succeeded. You can view this batch in Transaction Batches.',
+          onRetry: resetDkv,
+        });
+      } else if ('success' in data && !data.success) {
+        setDkvError({
+          fileName: file.name, fileType: 'DKV File', stage: data.stage,
+          message: data.message, suggestedAction: data.suggestedAction, onRetry: resetDkv,
+        });
+        setDkvFile(null);
+      } else {
+        setDkvError({
+          fileName: file.name, fileType: 'DKV File', stage: 'response',
+          message: 'The server returned an unexpected response.',
+          suggestedAction: 'Try uploading again.', onRetry: resetDkv,
+        });
+        setDkvFile(null);
+      }
+    } catch {
+      setDkvError({
+        fileName: file.name, fileType: 'DKV File', stage: 'file-read',
+        message: 'The upload request failed — the server may be unreachable.',
+        suggestedAction: 'Check that the development server is running on port 3993 and try again.',
+        onRetry: resetDkv,
+      });
+      setDkvFile(null);
+    } finally {
+      setIsProcessing(false);
+    }
+  }, [resetDkv]);
+
   // ── Dropzone: DKV File ─────────────────────────────────────────────────────
   const { getRootProps: getDkvProps, getInputProps: getDkvInput, isDragActive: dkvActive } = useDropzone({
     accept: {
@@ -95,59 +146,22 @@ export default function DKVCheckPage() {
     },
     multiple: false,
     disabled: isProcessing,
-    onDrop: async (accepted) => {
+    onDrop: (accepted) => {
       const file = accepted[0];
-      if (!file) return;
-      setDkvFile(file);
-      setDkvError(null);
-      setIsProcessing(true);
-
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('type', file.name.toLowerCase().includes('invoice') ? 'DKV Invoice' : 'DKV Transactions');
-
-      try {
-        const res = await fetch('/api/upload', { method: 'POST', body: formData });
-        const data: UploadResponse = await res.json();
-
-        if ('success' in data && data.success && data.uploadSummary) {
-          setUploadSummary({ fileId: data.fileId, ...data.uploadSummary });
-        } else if ('success' in data && data.success && !data.uploadSummary) {
-          setDkvError({
-            fileName: file.name,
-            fileType: 'DKV File',
-            stage: 'summary-generation',
-            message: data.summaryWarning || 'The file was imported but the upload summary could not be generated.',
-            suggestedAction: 'The core import succeeded. You can view this batch in Transaction Batches.',
-            onRetry: resetDkv,
-          });
-        } else if ('success' in data && !data.success) {
-          setDkvError({
-            fileName: file.name, fileType: 'DKV File', stage: data.stage,
-            message: data.message, suggestedAction: data.suggestedAction, onRetry: resetDkv,
-          });
-          setDkvFile(null);
-        } else {
-          setDkvError({
-            fileName: file.name, fileType: 'DKV File', stage: 'response',
-            message: 'The server returned an unexpected response.',
-            suggestedAction: 'Try uploading again.', onRetry: resetDkv,
-          });
-          setDkvFile(null);
-        }
-      } catch {
-        setDkvError({
-          fileName: file.name, fileType: 'DKV File', stage: 'file-read',
-          message: 'The upload request failed — the server may be unreachable.',
-          suggestedAction: 'Check that the development server is running on port 3993 and try again.',
-          onRetry: resetDkv,
-        });
-        setDkvFile(null);
-      } finally {
-        setIsProcessing(false);
-      }
+      if (file) void processDkvUpload(file);
     },
   });
+
+  const { onChange: _dkvDropzoneOnChange, ...dkvInputProps } = getDkvInput();
+
+  useEffect(() => {
+    if (process.env.NEXT_PUBLIC_E2E_HOOKS === 'true') {
+      (window as unknown as { __testUploadDkv?: (f: File) => Promise<void> }).__testUploadDkv = processDkvUpload;
+    }
+    return () => {
+      delete (window as unknown as { __testUploadDkv?: (f: File) => Promise<void> }).__testUploadDkv;
+    };
+  }, [processDkvUpload]);
 
   // ── Dropzone: GPS ──────────────────────────────────────────────────────────
   const { getRootProps: getGpsProps, getInputProps: getGpsInput, isDragActive: gpsActive } = useDropzone({
@@ -296,7 +310,14 @@ export default function DKVCheckPage() {
                 <div {...getDkvProps()} className={`card border-2 border-dashed flex flex-col items-center justify-center py-20 text-center cursor-pointer transition ${
                   dkvActive ? 'border-brand-500 bg-brand-500/5' : 'border-slate-350 dark:border-surface-300 hover:bg-slate-50 dark:hover:bg-surface-50'
                 }`}>
-                  <input {...getDkvInput()} />
+                  <input
+                    {...dkvInputProps}
+                    data-testid="dkv-file-upload"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) void processDkvUpload(file);
+                    }}
+                  />
                   <Upload className="h-10 w-10 text-slate-400 mb-3" />
                   <p className="text-sm font-bold text-slate-800 dark:text-surface-950">Drag and drop DKV transaction report here</p>
                   <p className="text-2xs text-slate-400 mt-1">Supports XLSX, XLS, and CSV files</p>
