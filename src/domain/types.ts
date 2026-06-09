@@ -330,7 +330,45 @@ export interface CanonicalInvoiceRow {
 
   // Provider
   readonly provider: CardProvider;
+
+  // AS24 card-filling specific canonical fields
+  readonly vehicleRegistration?: string;
+  readonly pumpCode?: string;
+  readonly countryCode?: string;
+  readonly forecourtCode?: string;
+  readonly forecourtName?: string;
+  readonly transactionDateTime?: string;
+  readonly mileageKm?: string;
+  readonly litresPer100Km?: string;
+  readonly volume?: string;
+  readonly volumeUnit?: string;
+  readonly stationCurrency?: string;
+  readonly unitPriceVatIncluded?: string;
+  readonly rebate?: string;
+  readonly stationAmountExVat?: string;
+  readonly stationVatAmount?: string;
+  readonly paymentAmountExVat?: string;
+  readonly paymentAmountInclVat?: string;
+  readonly sourcePage?: number;
+  readonly extractionConfidence?: number;
+  readonly status?: string;
+  readonly warnings?: string[];
+  readonly financialMetadata?: {
+
+    readonly paymentAmountExVat?: FinancialFieldMetadata;
+    readonly volume?: FinancialFieldMetadata;
+  };
 }
+
+export interface FinancialFieldMetadata {
+  readonly sourceHeading: string;
+  readonly currency: string;
+  readonly isNet: boolean;
+  readonly isPaymentCurrency: boolean;
+  readonly parserConfidence: number;
+  readonly isFallback?: boolean;
+}
+
 
 /** Normalised GPS / telematics data point. */
 export interface CanonicalTelematicsPoint {

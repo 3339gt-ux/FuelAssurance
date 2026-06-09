@@ -2,10 +2,12 @@
  * AS24 PDF Invoice Parser
  *
  * Extracts and parses transaction details from AS24 PDF invoice statements.
- * Identifies three core sections:
- *   1. Invoice Statement (Summary & Control Totals)
- *   2. Cards Filling List (Fuel, Tolls, Parking)
- *   3. PASSango Transaction Report (Electronic Tolls)
+ * Features:
+ *   1. Coordinate-aware PDF table parsing using text token positions (prevents token concatenation).
+ *   2. Plausibility validation for fuel volume (1,250 litres ceiling with auto-remapping).
+ *   3. Field-level financial validation (ex-VAT net payment amount ratio check).
+ *   4. Stateful page continuation (carries current card, vehicle, and odometer across page breaks).
+ *   5. Clearly versioned fallback parser when coordinates are unavailable.
  */
 
 import {
@@ -16,8 +18,21 @@ import {
   ProductType,
   CardProvider,
   TimestampPrecision,
+  type FinancialFieldMetadata,
 } from '@/domain/types';
 import { generateId, normaliseCardNumber, normaliseStationCode } from '@/lib/utils';
+
+export interface PdfItem {
+  str: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export const MAX_FLEET_FUEL_CAPACITY_LITRES = 1250;
+export const PARSER_VERSION_COORDINATE = '2.0.0-coordinate';
+export const PARSER_VERSION_FALLBACK = '1.0.0-fallback';
 
 // Helper: parse DD/MM/YYYY date string to YYYY-MM-DD
 function parseDateStr(str: string): string {
@@ -141,6 +156,161 @@ function parseRightSide(str: string): {
 }
 
 /**
+ * Heuristic volume remapper to separate concatenated adjacent fields (e.g. mileage, consumption, volume).
+ */
+export function attemptVolumeRemap(
+  rawVolumeStr: string,
+  mileageStr?: string,
+  consumptionStr?: string
+): string | null {
+  const cleaned = rawVolumeStr.replace(/[\s,]+/g, '');
+
+  const val = parseFloat(cleaned);
+  if (!isNaN(val) && val > 0 && val <= MAX_FLEET_FUEL_CAPACITY_LITRES) {
+    return cleaned;
+  }
+
+  // If we have a pattern like 896004.28310.46 or 896004.28310
+  if (mileageStr) {
+    const mil = mileageStr.replace(/[\s,]+/g, '');
+    if (cleaned.startsWith(mil)) {
+      let rest = cleaned.slice(mil.length);
+      if (consumptionStr) {
+        const cons = consumptionStr.trim();
+        if (rest.startsWith(cons)) {
+          rest = rest.slice(cons.length);
+        } else {
+          const consNoDot = cons.replace(/\./g, '');
+          if (rest.startsWith(consNoDot)) {
+            rest = rest.slice(consNoDot.length);
+          }
+        }
+      }
+      const parsedRest = parseFloat(rest);
+      if (!isNaN(parsedRest) && parsedRest > 0 && parsedRest <= MAX_FLEET_FUEL_CAPACITY_LITRES) {
+        return rest;
+      }
+    }
+  }
+
+  // Handle multiple decimal dots
+  const dotCount = (cleaned.match(/\./g) || []).length;
+  if (dotCount >= 2) {
+    const parts = cleaned.split('.');
+    if (parts.length >= 3) {
+      const volCandidate = `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
+      const parsedCand = parseFloat(volCandidate);
+      if (!isNaN(parsedCand) && parsedCand > 0 && parsedCand <= MAX_FLEET_FUEL_CAPACITY_LITRES) {
+        return volCandidate;
+      }
+    }
+  }
+
+  // Retrieve decimal number from end
+  const decimalMatch = cleaned.match(/(\d+\.\d+)$/);
+  if (decimalMatch) {
+    const parsed = parseFloat(decimalMatch[1]!);
+    if (parsed > 0 && parsed <= MAX_FLEET_FUEL_CAPACITY_LITRES) {
+      return decimalMatch[1]!;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Validate fuel volume is within physically plausible limits.
+ */
+export function validateAndRemapVolume(
+  rawVolume: string,
+  mileageStr?: string,
+  consumptionStr?: string
+): {
+  volume: string;
+  status: string;
+  warnings: string[];
+} {
+  const original = rawVolume.trim();
+  const cleaned = original.replace(/[\s,]+/g, '');
+  const parsed = parseFloat(cleaned);
+
+  if (!isNaN(parsed) && parsed > 0 && parsed <= MAX_FLEET_FUEL_CAPACITY_LITRES) {
+    return {
+      volume: cleaned,
+      status: 'OK',
+      warnings: [],
+    };
+  }
+
+  const remapped = attemptVolumeRemap(original, mileageStr, consumptionStr);
+  if (remapped) {
+    return {
+      volume: remapped,
+      status: 'Needs field review',
+      warnings: [
+        `PHYSICAL_LIMIT_EXCEEDED: Volume "${original}" exceeded the ceiling of ${MAX_FLEET_FUEL_CAPACITY_LITRES}L. ` +
+        `Remapped to "${remapped}" from adjacent fields.`
+      ],
+    };
+  }
+
+  return {
+    volume: cleaned,
+    status: 'PARSER_MAPPING_ERROR',
+    warnings: [
+      `PHYSICAL_LIMIT_EXCEEDED: Volume "${original}" exceeds the physical fleet capacity ceiling of ${MAX_FLEET_FUEL_CAPACITY_LITRES} litres.`
+    ],
+  };
+}
+
+/**
+ * Validate Net and Gross financials and make sure they are not concatenated.
+ */
+export function validateFinancials(
+  exVat: string,
+  inclVat: string,
+  currency: string
+): {
+  status: string;
+  warnings: string[];
+} {
+  const net = parseFloat(exVat.replace(/[\s,]+/g, ''));
+  const gross = parseFloat(inclVat.replace(/[\s,]+/g, ''));
+
+  if (isNaN(net) || !isFinite(net) || net <= 0) {
+    return {
+      status: 'PARSER_MAPPING_ERROR',
+      warnings: [`FINANCIAL_VALIDATION_ERROR: Payment amount ex VAT "${exVat}" is invalid or non-positive.`],
+    };
+  }
+
+  if (isNaN(gross) || !isFinite(gross) || gross <= 0) {
+    return {
+      status: 'PARSER_MAPPING_ERROR',
+      warnings: [`FINANCIAL_VALIDATION_ERROR: Payment amount incl VAT "${inclVat}" is invalid or non-positive.`],
+    };
+  }
+
+  // Plausible VAT rates are 0% to 30%. Net to Gross ratio should be between 1.0 and 1.35.
+  const ratio = gross / net;
+  if (ratio < 0.95 || ratio > 1.35) {
+    return {
+      status: 'PARSER_MAPPING_ERROR',
+      warnings: [
+        `FINANCIAL_VALIDATION_ERROR: Plausibility ratio check failed. ` +
+        `Gross/Net ratio is ${ratio.toFixed(3)} (outside standard 1.0 to 1.35 range). ` +
+        `exVAT: ${exVat}, inclVAT: ${inclVat}.`
+      ],
+    };
+  }
+
+  return {
+    status: 'OK',
+    warnings: [],
+  };
+}
+
+/**
  * Detect sections in raw PDF text.
  */
 export function detectSections(text: string): PdfSection[] {
@@ -213,7 +383,6 @@ export function parseInvoiceStatement(text: string): AS24InvoiceStatement {
   }
 
   // Parse statement lines to construct country control totals
-  // Example: Electronic Toll System - Austria6800PFA025731EUR2 856.04571.213 427.253 427.25
   const itemRegex = /^(.+?)([0-9]{4}[A-Z]{3}[0-9]+)(EUR|GBP|HUF|PLN)([\d\s\.,]+)$/;
   for (const line of lines) {
     const match = line.match(itemRegex);
@@ -221,7 +390,6 @@ export function parseInvoiceStatement(text: string): AS24InvoiceStatement {
       const label = match[1]?.trim() || '';
       const numString = (match[4] || '').replace(/[\s\xA0]+/g, '');
       
-      // Parse numbers from the end: net, vat, gross, paid
       const decPlaces = [2, 2, 2, 2];
       const numbers: string[] = [];
       let temp = numString;
@@ -294,9 +462,9 @@ function detectProductType(code: string, name: string): ProductType {
 }
 
 /**
- * Parse Cards Filling List section.
+ * Versioned fallback parser (used when coordinates are unavailable).
  */
-export function parseCardFillingList(text: string, fileId: string): CanonicalInvoiceRow[] {
+export function parseCardFillingListFallback(text: string, fileId: string): CanonicalInvoiceRow[] {
   const normalized = text.replace(/\xA0/g, ' ');
   const lines = normalized.split('\n').map((l) => l.trim()).filter(Boolean);
 
@@ -313,7 +481,6 @@ export function parseCardFillingList(text: string, fileId: string): CanonicalInv
     const line = lines[i];
     if (!line) continue;
 
-    // Filter out obvious header/total rows
     if (
       line.includes('Cards filling list') ||
       line.includes('Vehicle/Driver') ||
@@ -327,7 +494,6 @@ export function parseCardFillingList(text: string, fileId: string): CanonicalInv
       continue;
     }
 
-    // Detect card header row:  * 0001-2 241 MH 236261000
     const cardHeaderMatch = line.match(/^\s*\*\s*([\d\-]+)\s+(IE-\s*)?([0-9]{3}\s*[A-Z]{1,2}\s*[0-9]+.*)$/i);
     if (cardHeaderMatch) {
       currentCard = (cardHeaderMatch[1] || '').trim();
@@ -338,10 +504,6 @@ export function parseCardFillingList(text: string, fileId: string): CanonicalInv
       continue;
     }
 
-    // Check if detail line
-    const isInherited = line.trim().startsWith('*');
-    
-    // Match line details using the unified regex anchor
     const lineRegex = /^\s*(?:\*\s*)?(?:([A-Z0-9]{2})\s+([A-Za-z\s\*]+?)\s*)?(?:(\d{2})?\s*([A-Z]{3})\s+(\w{4})\s+)/i;
     const match = line.match(lineRegex);
     if (!match) continue;
@@ -352,7 +514,6 @@ export function parseCardFillingList(text: string, fileId: string): CanonicalInv
     const country = match[4] || '';
     const stationCode = match[5] || '';
 
-    // Determine product info
     let productCode = '';
     let productName = '';
 
@@ -376,7 +537,6 @@ export function parseCardFillingList(text: string, fileId: string): CanonicalInv
     const dateISO = parseDateStr(dateStr.slice(0, 10));
     const timestampISO = `${dateISO}T${parseTimeStr(dateStr.slice(11))}:00.000Z`;
 
-    // Extract numbers and currency from right side of date
     const rightSide = remaining.slice(dateIndex + 16).trim();
     const currencyMatch = rightSide.match(/(EUR|GBP|HUF|PLN)/i);
     if (!currencyMatch || currencyMatch.index === undefined) continue;
@@ -386,7 +546,6 @@ export function parseCardFillingList(text: string, fileId: string): CanonicalInv
     const leftOfCurrency = rightSide.slice(0, currencyMatch.index).trim();
     const rightOfCurrency = rightSide.slice(currencyMatch.index + currency.length).trim();
 
-    // Parse Left numbers: mileage/odometer, consumption/middle, quantity/litres
     let quantity = '0';
     let mileage = currentOdometer;
 
@@ -403,13 +562,26 @@ export function parseCardFillingList(text: string, fileId: string): CanonicalInv
       }
     }
 
-    // Parse Right numbers (7 values)
     const rightNums = parseRightSide(rightOfCurrency);
-
-    lastProductCode = productCode;
-    lastProductName = productName;
-
     const productType = detectProductType(productCode, productName);
+
+    // Run physical & financial validations in fallback
+    const volVal = validateAndRemapVolume(quantity, mileage, '0');
+    const finVal = validateFinancials(rightNums.amountExVat, rightNums.amountInclVat, 'EUR');
+
+    const warningList = [
+      'COORDINATES_UNAVAILABLE: Page parsed using fallback string match parser. Field boundaries are uncertain.',
+      ...volVal.warnings,
+      ...finVal.warnings,
+    ];
+
+    const finalStatus = volVal.status === 'PARSER_MAPPING_ERROR' || finVal.status === 'PARSER_MAPPING_ERROR'
+      ? 'PARSER_MAPPING_ERROR'
+      : 'Needs field review';
+
+    const confidence = volVal.status === 'PARSER_MAPPING_ERROR' || finVal.status === 'PARSER_MAPPING_ERROR'
+      ? 10
+      : 50;
 
     rows.push({
       id: generateId(),
@@ -439,10 +611,10 @@ export function parseCardFillingList(text: string, fileId: string): CanonicalInv
       productName,
       productType,
       costGroup: '',
-      quantity,
-      unit: productType === ProductType.DIESEL || productType === ProductType.ADBLUE || productType === ProductType.GNR ? 'L' : 'ST',
+      quantity: volVal.volume,
+      unit: productType === ProductType.TOLL ? 'ST' : 'L',
       pricePerUnit: rightNums.unitPrice,
-      pricePerUnitGross: rightNums.unitPrice, // fallback
+      pricePerUnitGross: rightNums.unitPrice,
       baseValueNet: rightNums.amountExVat,
       baseValueGross: rightNums.amountInclVat,
       serviceFeeNet: '0',
@@ -450,8 +622,8 @@ export function parseCardFillingList(text: string, fileId: string): CanonicalInv
       discountNet: rightNums.rebate,
       discountGross: '0',
       vat: rightNums.vat,
-      paymentCurrency: currency,
-      serviceCurrency: currency,
+      paymentCurrency: 'EUR', // Primary payment currency is always EUR settled
+      serviceCurrency: currency, // Station currency
       valueInPayCurrency: rightNums.amountInclVat,
       valueInServiceCountryCurrency: rightNums.amountInclVat,
       costCentre1: '',
@@ -461,6 +633,45 @@ export function parseCardFillingList(text: string, fileId: string): CanonicalInv
       customerId: '',
       cardNumberPartner: '',
       provider: CardProvider.AS24,
+      vehicleRegistration: currentReg,
+      pumpCode: pump,
+      countryCode: country,
+      forecourtCode: stationCode,
+      forecourtName: stationName,
+      transactionDateTime: dateStr,
+      mileageKm: mileage,
+      litresPer100Km: leftDecimals && leftDecimals.length > 1 ? leftDecimals[0] : '0',
+      volume: volVal.volume,
+      volumeUnit: 'L',
+      stationCurrency: currency,
+      unitPriceVatIncluded: rightNums.unitPrice,
+      rebate: rightNums.rebate,
+      stationAmountExVat: rightNums.netPrice,
+      stationVatAmount: rightNums.vat,
+      paymentAmountExVat: rightNums.amountExVat,
+      paymentAmountInclVat: rightNums.amountInclVat,
+      sourcePage: 0,
+      extractionConfidence: confidence,
+      status: finalStatus,
+      warnings: warningList,
+      financialMetadata: {
+        paymentAmountExVat: {
+          sourceHeading: 'Amount ex. VAT (fallback)',
+          currency: 'EUR',
+          isNet: true,
+          isPaymentCurrency: true,
+          parserConfidence: confidence,
+          isFallback: true,
+        },
+        volume: {
+          sourceHeading: 'Volume (fallback)',
+          currency: 'L',
+          isNet: true,
+          isPaymentCurrency: false,
+          parserConfidence: confidence,
+          isFallback: true,
+        }
+      }
     });
   }
 
@@ -468,9 +679,9 @@ export function parseCardFillingList(text: string, fileId: string): CanonicalInv
 }
 
 /**
- * Parse PASSango Transaction Report section.
+ * Fallback parser for PASSango electronic toll report.
  */
-export function parsePASSangoSection(text: string, fileId: string): CanonicalInvoiceRow[] {
+export function parsePASSangoSectionFallback(text: string, fileId: string): CanonicalInvoiceRow[] {
   const normalized = text.replace(/\xA0/g, ' ');
   const lines = normalized.split('\n').map((l) => l.trim()).filter(Boolean);
 
@@ -483,7 +694,6 @@ export function parsePASSangoSection(text: string, fileId: string): CanonicalInv
     const line = lines[i];
     if (!line) continue;
 
-    // Filter out headers/footers
     if (
       line.includes('PASSango : Transaction') ||
       line.includes('Registration nbr') ||
@@ -495,8 +705,6 @@ export function parsePASSangoSection(text: string, fileId: string): CanonicalInv
       continue;
     }
 
-    // Check if it defines a new vehicle/OBU block
-    // E.g. IE- 241MH2436078110082406062200011077794400018/05/2026...
     const regMatch = line.match(/^\s*(IE-\s*(?:241MH\d{3}|252MH(?:1\d{3}|[78]\d{2})))/i);
     const startsWithDate = line.match(/^\s*(\d{2}\/\d{2}\/\d{4})/);
 
@@ -504,16 +712,13 @@ export function parsePASSangoSection(text: string, fileId: string): CanonicalInv
       const regVal = regMatch[1];
       if (regVal) {
         currentReg = regVal.replace(/\s+/g, '');
-        // Extract OBU ID (usually 10 digits following the registration)
         const rest = line.slice(line.indexOf(regVal) + regVal.length).trim();
-        // OBU is typically the next 10 digits
         const obuMatch = rest.match(/^(\d{10})/);
         currentObuId = obuMatch ? obuMatch[1] || '' : '';
       }
     }
 
     if (regMatch || startsWithDate) {
-      // Find date
       const dateMatch = line.match(/(\d{2}\/\d{2}\/\d{4})/);
       if (!dateMatch || dateMatch.index === undefined) continue;
 
@@ -522,7 +727,6 @@ export function parsePASSangoSection(text: string, fileId: string): CanonicalInv
       const dateISO = parseDateStr(dateStr);
 
       const rightPart = line.slice(dateMatch.index + 10).trim();
-      // Right part starts with reference: e.g. 2026-FLN-0000041522
       const refMatch = rightPart.match(/^(\d{4}-[A-Z]{3}-\d+)/);
       if (!refMatch) continue;
 
@@ -530,7 +734,6 @@ export function parsePASSangoSection(text: string, fileId: string): CanonicalInv
       if (!reference) continue;
       const detailPart = rightPart.slice(reference.length).trim();
 
-      // Region name goes until numbers start
       const numStartMatch = detailPart.match(/([\d\.\s,]+)$/);
       if (!numStartMatch) continue;
 
@@ -539,8 +742,6 @@ export function parsePASSangoSection(text: string, fileId: string): CanonicalInv
       if (!numStringVal) continue;
       const numString = numStringVal.trim();
 
-      // Parse numbers from right: gross, net, distance
-      // Distance usually has 3 dec, net has 2 dec, gross has 2 dec
       const decPlaces = [2, 2];
       const parts: string[] = [];
       let temp = numString.replace(/[\s\xA0]+/g, '');
@@ -569,6 +770,8 @@ export function parsePASSangoSection(text: string, fileId: string): CanonicalInv
       const netAmount = parts[1] || '0';
       const grossAmount = parts[0] || '0';
 
+      const finVal = validateFinancials(netAmount, grossAmount, 'EUR');
+
       rows.push({
         id: generateId(),
         importFileId: fileId,
@@ -590,7 +793,7 @@ export function parsePASSangoSection(text: string, fileId: string): CanonicalInv
         stationName: regionName,
         stationCity: '',
         stationZipCode: '',
-        serviceCountry: 'BEL', // Regions are BELGIUM-Région Flandre/Bruxelles/Sofico
+        serviceCountry: 'BEL',
         invoiceCountry: '',
         productCode: 'PASSango',
         productGroup: 'Toll',
@@ -619,6 +822,11 @@ export function parsePASSangoSection(text: string, fileId: string): CanonicalInv
         customerId: '',
         cardNumberPartner: '',
         provider: CardProvider.AS24,
+        warnings: [
+          'COORDINATES_UNAVAILABLE: PASSango page parsed using fallback string match parser.',
+          ...finVal.warnings
+        ],
+        status: finVal.status,
       });
     }
   }
@@ -634,32 +842,396 @@ export interface AS24ParseResult {
 }
 
 /**
+ * Coordinate-aware extraction logic.
+ */
+function parseAS24PDFCoordinate(
+  pagesData: Array<{ pageNum: number; items: PdfItem[] }>,
+  fileId: string,
+  statement?: AS24InvoiceStatement
+): CanonicalInvoiceRow[] {
+  const rows: CanonicalInvoiceRow[] = [];
+
+  // Stateful tracking across pages
+  let currentCard = '';
+  let currentReg = '';
+  let currentCardOdometer = '';
+  let currentObuId = '';
+  let lastProductCode = '';
+  let lastProductName = '';
+
+  for (const page of pagesData) {
+    // 1. Group items by Y coordinate (tolerance 3.0)
+    const yRows: PdfItem[][] = [];
+    const sortedItems = [...page.items].sort((a, b) => b.y - a.y);
+    
+    for (const item of sortedItems) {
+      let placed = false;
+      for (const row of yRows) {
+        if (row[0] !== undefined && Math.abs(row[0].y - item.y) < 3.0) {
+          row.push(item);
+          placed = true;
+          break;
+        }
+      }
+      if (!placed) {
+        yRows.push([item]);
+      }
+    }
+
+    // Sort items within each row by X ascending
+    for (const row of yRows) {
+      row.sort((a, b) => a.x - b.x);
+    }
+    // Sort rows by Y descending (top to bottom)
+    yRows.sort((a, b) => (b[0]?.y ?? 0) - (a[0]?.y ?? 0));
+
+    // 2. Detect page type
+    let isCardFillingList = false;
+    let isPassango = false;
+    for (const row of yRows) {
+      const rowText = row.map(i => i.str).join(' ');
+      if (rowText.includes('Cards filling list') || rowText.includes('Vehicle/Driver')) {
+        isCardFillingList = true;
+      }
+      if (rowText.includes('PASSango : Transaction') || rowText.includes('Registration nbr')) {
+        isPassango = true;
+      }
+    }
+
+    // 3. Parse Card Filling List
+    if (isCardFillingList) {
+      for (const row of yRows) {
+        // Build 16 columns
+        const cols: string[] = Array(16).fill('');
+        for (const item of row) {
+          const x = item.x;
+          let colIdx = 0;
+          if (x < 70) colIdx = 0;
+          else if (x < 100) colIdx = 1;
+          else if (x < 110) colIdx = 2;
+          else if (x < 190) colIdx = 3;
+          else if (x < 235) colIdx = 4;
+          else if (x < 255) colIdx = 5;
+          else if (x < 280) colIdx = 6;
+          else if (x < 305) colIdx = 7;
+          else if (x < 330) colIdx = 8;
+          else if (x < 370) colIdx = 9;
+          else if (x < 400) colIdx = 10;
+          else if (x < 435) colIdx = 11;
+          else if (x < 465) colIdx = 12;
+          else if (x < 500) colIdx = 13;
+          else if (x < 545) colIdx = 14;
+          else colIdx = 15;
+
+          cols[colIdx] = (cols[colIdx] ? cols[colIdx] + ' ' : '') + item.str.trim();
+        }
+
+        // Check if Card Header row
+        // e.g. " * 0151-0 252MH1717"
+        const cardHeaderMatch = (cols[0] ?? '').match(/^\s*\*\s*([\d\-]+)\s+(?:IE-\s*)?([A-Z0-9\s]+)$/i);
+        if (cardHeaderMatch) {
+          currentCard = cardHeaderMatch[1]?.trim() ?? '';
+          const regOdo = cardHeaderMatch[2]?.trim() ?? '';
+          const parsedRegOdo = splitRegAndOdo(regOdo);
+          currentReg = parsedRegOdo.registration;
+          currentCardOdometer = (cols[5] ?? '').trim() || parsedRegOdo.odometer || '0';
+          continue;
+        }
+
+        // Exclude subtotals / totals
+        const rowText = row.map(i => i.str).join(' ');
+        if (
+          rowText.includes('Cards filling list') ||
+          rowText.includes('Vehicle/Driver') ||
+          rowText.includes('Card Registration') ||
+          rowText.includes('Total card') ||
+          rowText.includes('Total contract') ||
+          rowText.includes('Customer number') ||
+          rowText.includes('Page ') ||
+          rowText.startsWith('###')
+        ) {
+          continue;
+        }
+
+        // Verify if Transaction detail row
+        const dateTimeVal = (cols[4] ?? '').trim();
+        const dateMatch = dateTimeVal.match(/^(\d{2}\/\d{2}\/\d{4})\s+(\d{2}:\d{2})/);
+        if (!dateMatch) continue;
+
+        const dateISO = parseDateStr(dateMatch[1] ?? '');
+        const timestampISO = `${dateISO}T${dateMatch[2] ?? '00:00'}:00.000Z`;
+
+        // Parse product details
+        const rawProd = (cols[1] ?? '').trim();
+        if (rawProd) {
+          const codeMatch = rawProd.match(/^([A-Z0-9]{2})\s+(.*)/i);
+          if (codeMatch) {
+            lastProductCode = codeMatch[1]?.trim() ?? '';
+            lastProductName = codeMatch[2]?.trim() ?? '';
+          } else {
+            lastProductCode = rawProd.slice(0, 2).trim();
+            lastProductName = rawProd.slice(2).trim();
+          }
+        }
+
+        const productType = detectProductType(lastProductCode, lastProductName);
+        const mileageKm = (cols[5] ?? '').trim() || currentCardOdometer;
+
+        // Perform hard validations
+        const volumeVal = validateAndRemapVolume(cols[7] ?? '', mileageKm, cols[6] ?? '');
+        const finVal = validateFinancials(cols[14] ?? '', cols[15] ?? '', 'EUR');
+
+        const finalStatus = volumeVal.status === 'PARSER_MAPPING_ERROR' || finVal.status === 'PARSER_MAPPING_ERROR'
+          ? 'PARSER_MAPPING_ERROR'
+          : (volumeVal.status === 'Needs field review' ? 'Needs field review' : 'OK');
+
+        const extractionConfidence = finalStatus === 'PARSER_MAPPING_ERROR' ? 30 : (finalStatus === 'Needs field review' ? 70 : 100);
+
+        rows.push({
+          id: generateId(),
+          importFileId: fileId,
+          importRowIndex: Math.round(row[0]?.y ?? 0), // Y coordinate row identification
+          registration: currentReg,
+          cardNumber: currentCard,
+          cardNumberNormalised: normaliseCardNumber(currentCard),
+          equipmentNumber: '',
+          invoiceNumber: statement?.invoiceNumber || '',
+          invoiceDate: statement?.invoiceDate || '',
+          documentNumber: '',
+          ticketNumber: '',
+          transactionDate: dateISO,
+          transactionTimestamp: timestampISO,
+          timestampPrecision: TimestampPrecision.EXACT,
+          transactionNumber: '',
+          stationNumber: (cols[3] ?? '').match(/^\w{3}\s+(\w{4})/)?.[1] ?? '',
+          stationNumberNormalised: normaliseStationCode((cols[3] ?? '').match(/^\w{3}\s+(\w{4})/)?.[1] ?? ''),
+          stationName: (cols[3] ?? '').replace(/^\w{3}\s+\w{4}\s+/, '').trim(),
+          stationCity: '',
+          stationZipCode: '',
+          serviceCountry: (cols[3] ?? '').slice(0, 3).trim(),
+          invoiceCountry: '',
+          productCode: lastProductCode,
+          productGroup: '',
+          productName: lastProductName,
+          productType,
+          costGroup: '',
+          quantity: volumeVal.volume,
+          unit: productType === ProductType.TOLL ? 'ST' : 'L',
+          pricePerUnit: (cols[9] ?? '').trim(),
+          pricePerUnitGross: (cols[9] ?? '').trim(),
+          baseValueNet: (cols[14] ?? '').trim(), // Amount ex VAT in payment currency (Headline ex-VAT settled value)
+          baseValueGross: (cols[15] ?? '').trim(),
+          serviceFeeNet: '0',
+          valueOfPurchaseNet: (cols[14] ?? '').trim(),
+          discountNet: (cols[10] ?? '').trim(),
+          discountGross: '0',
+          vat: (cols[13] ?? '').trim(),
+          paymentCurrency: 'EUR',
+          serviceCurrency: (cols[8] ?? '').trim(),
+          valueInPayCurrency: (cols[15] ?? '').trim(),
+          valueInServiceCountryCurrency: (cols[15] ?? '').trim(),
+          costCentre1: '',
+          costCentre2: '',
+          mileage: mileageKm,
+          agesTerminal: '',
+          customerId: statement?.contractNumber ?? '',
+          cardNumberPartner: '',
+          provider: CardProvider.AS24,
+          // Canonical fields
+          vehicleRegistration: currentReg,
+          pumpCode: (cols[2] ?? '').trim(),
+          countryCode: (cols[3] ?? '').slice(0, 3).trim(),
+          forecourtCode: (cols[3] ?? '').match(/^\w{3}\s+(\w{4})/)?.[1] ?? '',
+          forecourtName: (cols[3] ?? '').replace(/^\w{3}\s+\w{4}\s+/, '').trim(),
+          transactionDateTime: (cols[4] ?? '').trim(),
+          mileageKm,
+          litresPer100Km: (cols[6] ?? '').trim(),
+          volume: volumeVal.volume,
+          volumeUnit: 'L',
+          stationCurrency: (cols[8] ?? '').trim(),
+          unitPriceVatIncluded: (cols[9] ?? '').trim(),
+          rebate: (cols[10] ?? '').trim(),
+          stationAmountExVat: (cols[11] ?? '').trim(),
+          stationVatAmount: (cols[13] ?? '').trim(),
+          paymentAmountExVat: (cols[14] ?? '').trim(),
+          paymentAmountInclVat: (cols[15] ?? '').trim(),
+          sourcePage: page.pageNum,
+          extractionConfidence,
+          status: finalStatus,
+          warnings: [...volumeVal.warnings, ...finVal.warnings],
+          financialMetadata: {
+            paymentAmountExVat: {
+              sourceHeading: 'Amount ex. VAT',
+              currency: 'EUR',
+              isNet: true,
+              isPaymentCurrency: true,
+              parserConfidence: extractionConfidence,
+            },
+            volume: {
+              sourceHeading: 'Volume',
+              currency: 'L',
+              isNet: true,
+              isPaymentCurrency: false,
+              parserConfidence: extractionConfidence,
+            }
+          }
+        });
+      }
+    }
+
+    // 4. Parse PASSango Tolls
+    if (isPassango) {
+      for (const row of yRows) {
+        const cols: string[] = Array(10).fill('');
+        for (const item of row) {
+          const x = item.x;
+          let colIdx = 0;
+          if (x < 50) colIdx = 0;
+          else if (x < 80) colIdx = 1;
+          else if (x < 150) colIdx = 2;
+          else if (x < 190) colIdx = 3;
+          else if (x < 220) colIdx = 4;
+          else if (x < 280) colIdx = 5;
+          else if (x < 400) colIdx = 6;
+          else if (x < 470) colIdx = 7;
+          else if (x < 530) colIdx = 8;
+          else colIdx = 9;
+
+          cols[colIdx] = (cols[colIdx] ? cols[colIdx] + ' ' : '') + item.str.trim();
+        }
+
+        // Exclude header / total rows
+        const rowText = row.map(i => i.str).join(' ');
+        if (
+          rowText.includes('PASSango : Transaction') ||
+          rowText.includes('Registration nbr') ||
+          rowText.includes('Maximum Gross') ||
+          rowText.includes('Total IE-') ||
+          rowText.includes('Page ') ||
+          rowText.startsWith('###')
+        ) {
+          continue;
+        }
+
+        // Vehicle / OBU header (often combined with the first toll row)
+        if ((cols[0] ?? '').trim().startsWith('IE-')) {
+          const regVal = (cols[0] ?? '').trim().replace(/\s+/g, '');
+          currentReg = regVal.replace(/^IE-/, '');
+          currentObuId = (cols[2] ?? '').trim().replace(/\s+/g, '');
+        }
+
+        const dateVal = (cols[4] ?? '').trim();
+        const dateMatch = dateVal.match(/^(\d{2}\/\d{2}\/\d{4})/);
+        if (!dateMatch) continue;
+
+        const dateISO = parseDateStr(dateMatch[1] ?? '');
+        const reference = (cols[5] ?? '').trim();
+        const regionName = (cols[6] ?? '').trim();
+        const distance = (cols[7] ?? '').trim();
+        const netAmount = (cols[8] ?? '').trim();
+        const grossAmount = (cols[9] ?? '').trim();
+
+        const finVal = validateFinancials(netAmount, grossAmount, 'EUR');
+
+        rows.push({
+          id: generateId(),
+          importFileId: fileId,
+          importRowIndex: Math.round(row[0]?.y ?? 0),
+          registration: currentReg,
+          cardNumber: currentObuId,
+          cardNumberNormalised: normaliseCardNumber(currentObuId),
+          equipmentNumber: '',
+          invoiceNumber: statement?.invoiceNumber || '',
+          invoiceDate: statement?.invoiceDate || '',
+          documentNumber: '',
+          ticketNumber: reference,
+          transactionDate: dateISO,
+          transactionTimestamp: `${dateISO}T00:00:00.000Z`,
+          timestampPrecision: TimestampPrecision.DATE_ONLY,
+          transactionNumber: reference,
+          stationNumber: '',
+          stationNumberNormalised: '',
+          stationName: regionName,
+          stationCity: '',
+          stationZipCode: '',
+          serviceCountry: 'BEL',
+          invoiceCountry: '',
+          productCode: 'PASSango',
+          productGroup: 'Toll',
+          productName: 'PASSango Toll',
+          productType: ProductType.TOLL,
+          costGroup: '',
+          quantity: distance,
+          unit: 'KM',
+          pricePerUnit: '0',
+          pricePerUnitGross: '0',
+          baseValueNet: netAmount,
+          baseValueGross: grossAmount,
+          serviceFeeNet: '0',
+          valueOfPurchaseNet: netAmount,
+          discountNet: '0',
+          discountGross: '0',
+          vat: '0',
+          paymentCurrency: 'EUR',
+          serviceCurrency: 'EUR',
+          valueInPayCurrency: grossAmount,
+          valueInServiceCountryCurrency: grossAmount,
+          costCentre1: '',
+          costCentre2: '',
+          mileage: '0',
+          agesTerminal: '',
+          customerId: statement?.contractNumber || '',
+          cardNumberPartner: '',
+          provider: CardProvider.AS24,
+          warnings: finVal.warnings,
+          status: finVal.status,
+        });
+      }
+    }
+  }
+
+  return rows;
+}
+
+/**
  * Main parser entry point for AS24 PDF.
  */
-export function parseAS24PDF(text: string, fileId: string): AS24ParseResult {
+export function parseAS24PDF(
+  text: string,
+  fileId: string,
+  pagesData?: Array<{ pageNum: number; items: PdfItem[] }>
+): AS24ParseResult {
   const sections = detectSections(text);
   const statementSec = sections.find((s) => s.type === 'INVOICE_STATEMENT');
-  const cardFillingSec = sections.find((s) => s.type === 'CARD_FILLING_LIST');
-  const passangoSec = sections.find((s) => s.type === 'PASSANGO');
-
   const statement = statementSec ? parseInvoiceStatement(statementSec.text) : undefined;
-  
-  const cardFillingRows = cardFillingSec ? parseCardFillingList(cardFillingSec.text, fileId) : [];
-  const passangoRows = passangoSec ? parsePASSangoSection(passangoSec.text, fileId) : [];
 
-  const invoiceRows = [...cardFillingRows, ...passangoRows];
+  let invoiceRows: CanonicalInvoiceRow[] = [];
+  let parserUsed = PARSER_VERSION_FALLBACK;
 
-  // Update invoice rows with statement fields if parsed
+  if (pagesData && pagesData.length > 0) {
+    invoiceRows = parseAS24PDFCoordinate(pagesData, fileId, statement);
+    parserUsed = PARSER_VERSION_COORDINATE;
+  } else {
+    // Use fallback parser
+    const cardFillingSec = sections.find((s) => s.type === 'CARD_FILLING_LIST');
+    const passangoSec = sections.find((s) => s.type === 'PASSANGO');
+
+    const cardFillingRows = cardFillingSec ? parseCardFillingListFallback(cardFillingSec.text, fileId) : [];
+    const passangoRows = passangoSec ? parsePASSangoSectionFallback(passangoSec.text, fileId) : [];
+
+    invoiceRows = [...cardFillingRows, ...passangoRows];
+  }
+
+  // Update invoice rows with statement fields if parsed (failsafe)
   if (statement) {
     for (let i = 0; i < invoiceRows.length; i++) {
       const row = invoiceRows[i];
       if (!row) continue;
-      // Workaround readonly properties: recreate object
       invoiceRows[i] = {
         ...row,
-        invoiceNumber: statement.invoiceNumber,
-        invoiceDate: statement.invoiceDate,
-        customerId: statement.contractNumber,
+        invoiceNumber: row.invoiceNumber || statement.invoiceNumber,
+        invoiceDate: row.invoiceDate || statement.invoiceDate,
+        customerId: row.customerId || statement.contractNumber,
       };
     }
   }

@@ -31,7 +31,9 @@ export interface DatabaseSchema {
   review_decisions: any[];
   audit_events: any[];
   simple_checks: any[];
+  transaction_batches: any[];
 }
+
 
 export const DEFAULT_ORG_ID = 'd3b07384-d113-4956-a5b2-7c30d1d3d4b4';
 export const DEFAULT_USER_ID = 'e5c1a7b0-84a2-4a1e-84b2-9a7e8a9f0b12';
@@ -98,7 +100,9 @@ const initialSchema: DatabaseSchema = {
   review_decisions: [],
   audit_events: [],
   simple_checks: [],
+  transaction_batches: [],
 };
+
 
 class LocalDatabase {
   private cache: DatabaseSchema | null = null;

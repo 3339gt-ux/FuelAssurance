@@ -23,6 +23,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Shield,
+  Layers,
 } from 'lucide-react';
 
 const navigation = [
@@ -71,6 +72,7 @@ export function Sidebar() {
     { name: 'Home', href: '/', icon: LayoutDashboard },
     { name: 'DKV Check', href: '/dkv-check', icon: GitCompareArrows },
     { name: 'AS24 Check', href: '/as24-check', icon: ClipboardCheck },
+    { name: 'Transaction Batches', href: '/batches', icon: Layers },
     { name: 'Previous Results', href: '/previous-results', icon: History },
     { name: 'Settings', href: '/settings', icon: Settings },
   ] : navigation;
