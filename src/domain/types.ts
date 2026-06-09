@@ -579,6 +579,7 @@ export interface TelematicsFactorResult {
   readonly rule: string;
   readonly result: 'PASS' | 'PARTIAL' | 'FAIL' | 'SKIP';
   readonly explanation: string;
+  readonly details?: any;
 }
 
 export interface TelematicsConfig {

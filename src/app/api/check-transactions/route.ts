@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { assessTransaction } from '@/domain/telematics/telematics-scorer';
 import { TelematicsClassification, ProductType } from '@/domain/types';
+import { normalizeRegistration } from '@/config/fleet-registry';
 
 export async function POST(req: NextRequest) {
   try {
@@ -28,10 +29,9 @@ export async function POST(req: NextRequest) {
     }
 
     // Filter by selected vehicle (normalize registrations to compare)
-    const normSelected = selectedVehicle.toUpperCase().replace(/\s+/g, '');
+    const normSelected = normalizeRegistration(selectedVehicle);
     const vehicleTxs = rawTxs.filter((tx: any) => {
-      const reg = (tx.registration || '').toUpperCase().replace(/\s+/g, '');
-      return reg === normSelected;
+      return normalizeRegistration(tx.registration) === normSelected;
     });
 
     if (vehicleTxs.length === 0) {
@@ -86,7 +86,7 @@ export async function POST(req: NextRequest) {
         provider: provider,
       };
 
-      const assessment = assessTransaction(canonicalTx as any, gpsPoints as any, null);
+      const assessment = assessTransaction(canonicalTx as any, gpsPoints as any, null, undefined, vehicleTxs as any);
       
       // Map classification to simple user-friendly status
       let simpleStatus = 'Review required';
@@ -155,6 +155,13 @@ export async function POST(req: NextRequest) {
       };
     });
 
+    // Calculate other fleet vehicles and transactions excluded from the check
+    const otherTxs = rawTxs.filter((tx: any) => {
+      const normReg = normalizeRegistration(tx.registration);
+      return normReg !== normSelected && normReg !== '';
+    });
+    const otherVehicles = Array.from(new Set(otherTxs.map((t: any) => normalizeRegistration(t.registration)).filter(Boolean)));
+
     // 5. Save simple check run to database
     const checkId = crypto.randomUUID();
     const simpleCheck = db.insert('simple_checks', {
@@ -170,6 +177,8 @@ export async function POST(req: NextRequest) {
       review_required_count: reviewRequired,
       unsupported_count: unsupported,
       insufficient_evidence_count: insufficient,
+      excluded_vehicles: otherVehicles,
+      excluded_transactions_count: otherTxs.length,
       results,
     });
 

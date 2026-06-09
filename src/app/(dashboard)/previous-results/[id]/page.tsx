@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
-import { ChevronDown, Printer, FileText, Download, ShieldCheck, ChevronRight, AlertTriangle, CheckCircle2, XCircle, Info, Calendar, ArrowLeft, RefreshCw } from 'lucide-react';
+import { ChevronDown, Printer, FileText, Download, ShieldCheck, ChevronRight, AlertTriangle, CheckCircle2, XCircle, Info, Calendar, ArrowLeft, RefreshCw, Landmark } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
 export default function CheckResultDetailsPage() {
@@ -83,13 +83,13 @@ export default function CheckResultDetailsPage() {
         : results;
 
   // Render friendly overall conclusion
-  let mainConclusion = `All ${check.total_transactions} transactions are supported by the available GPS evidence.`;
+  let mainConclusion = `All ${check.total_transactions} transactions for vehicle ${check.vehicle} are supported by the available GPS evidence.`;
   if (check.unsupported_count > 0 || check.review_required_count > 0 || check.insufficient_evidence_count > 0) {
     const issuesList = [];
     if (check.unsupported_count > 0) issuesList.push(`${check.unsupported_count} unsupported`);
     if (check.review_required_count > 0) issuesList.push(`${check.review_required_count} requiring review`);
     if (check.insufficient_evidence_count > 0) issuesList.push(`${check.insufficient_evidence_count} with insufficient evidence`);
-    mainConclusion = `${check.supported_count + check.likely_supported_count} of ${check.total_transactions} transactions are supported. ${issuesList.join(', ')} discrepancies identified.`;
+    mainConclusion = `${check.supported_count + check.likely_supported_count} of ${check.total_transactions} transactions for vehicle ${check.vehicle} are supported. ${issuesList.join(', ')} discrepancies identified.`;
   }
 
   // Prevent formula injection in CSV/XLSX cellular values
@@ -206,6 +206,21 @@ export default function CheckResultDetailsPage() {
         </p>
       </div>
 
+      {/* Exclusions Notice Banner */}
+      {check.excluded_transactions_count > 0 && (
+        <div className="flex gap-3 p-4 bg-amber-500/10 border border-amber-300 rounded-xl text-amber-800 text-xs animate-slide-down">
+          <Landmark className="h-5 w-5 shrink-0 mt-0.5 text-amber-600" />
+          <div>
+            <p className="font-bold">Vehicle-Focused check comparison filter</p>
+            <p className="mt-0.5">
+              This verification check includes only transactions linked to <span className="font-mono font-bold">{check.vehicle}</span>.
+              There are <span className="font-bold">{check.excluded_transactions_count} charges</span> in the transaction file for other fleet vehicles ({check.excluded_vehicles?.join(', ') || 'None'}) that were excluded.
+              To check those vehicles, return to the check wizard and upload the matching GPS telemetry file.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Status metrics grid */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
         {[
@@ -217,7 +232,7 @@ export default function CheckResultDetailsPage() {
         ].map((m) => (
           <div key={m.label} className="card p-3 flex items-center justify-between">
             <span className="text-3xs font-semibold text-slate-500 uppercase tracking-wider">{m.label}</span>
-            <span className={`h-6 px-2.5 rounded-full flex items-center justify-center text-xs font-bold ${m.bg} ${m.color}`}>
+            <span className="badge h-6 px-2.5 rounded-full flex items-center justify-center text-xs font-bold ${m.bg} ${m.color}">
               {m.count}
             </span>
           </div>
@@ -255,7 +270,7 @@ export default function CheckResultDetailsPage() {
           <div className="space-y-3">
             {displayedRows.map((r: any) => {
               const isExpanded = expandedRow === r.id;
-              
+
               // Status Styling mapping
               const statusStyles: Record<string, { bg: string; text: string; icon: any }> = {
                 Supported: { bg: 'bg-green-500/10', text: 'text-green-700 dark:text-green-400', icon: CheckCircle2 },
@@ -264,7 +279,7 @@ export default function CheckResultDetailsPage() {
                 'Not supported': { bg: 'bg-red-500/10', text: 'text-red-700 dark:text-red-400', icon: XCircle },
                 'Insufficient GPS evidence': { bg: 'bg-slate-500/10', text: 'text-slate-600 dark:text-surface-600', icon: Info },
               };
-              
+
               const style = statusStyles[r.simpleStatus] || { bg: 'bg-slate-100', text: 'text-slate-700', icon: Info };
               const Icon = style.icon;
 
@@ -332,9 +347,37 @@ export default function CheckResultDetailsPage() {
                           <h5 className="font-bold text-slate-800 dark:text-surface-950 text-2xs uppercase">Telemetry Audit Evidence</h5>
                           <div className="space-y-2 text-2xs font-mono text-slate-600 dark:text-surface-600 space-y-1">
                             {r.factors.map((f: any, idx: number) => (
-                              <div key={idx} className="border-l-2 border-slate-200 dark:border-surface-300 pl-2">
+                              <div key={idx} className="border-l-2 border-slate-200 dark:border-surface-300 pl-2 text-2xs">
                                 <p className="font-bold text-slate-800 dark:text-surface-800 capitalize">{f.factorName.toLowerCase()}:</p>
-                                <p className="text-3xs text-slate-500 mt-0.5">{f.explanation}</p>
+                                {f.details ? (
+                                  <div className="space-y-3 mt-1.5 p-3.5 bg-slate-100 dark:bg-surface-50 rounded-xl border border-slate-200 dark:border-surface-300 text-3xs font-medium font-sans">
+                                    <div className="text-2xs font-bold text-brand-800 dark:text-brand-400 bg-brand-500/10 p-2.5 rounded-lg border-l-4 border-l-brand-600 mb-3 leading-snug">
+                                      {f.details.plainEnglishConclusion}
+                                    </div>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-y-2.5 gap-x-6">
+                                      <div><span className="text-slate-400">Transaction Timestamp:</span> <span className="font-mono text-slate-850 dark:text-surface-900 block mt-0.5">{f.details.transactionTimestamp}</span></div>
+                                      <div><span className="text-slate-400">Applied Timezone:</span> <span className="text-slate-850 dark:text-surface-900 block mt-0.5">{f.details.timezoneApplied}</span></div>
+                                      <div><span className="text-slate-400">Session Window Start:</span> <span className="font-mono text-slate-850 dark:text-surface-900 block mt-0.5">{f.details.sessionStart}</span></div>
+                                      <div><span className="text-slate-400">Session Window End:</span> <span className="font-mono text-slate-855 dark:text-surface-900 block mt-0.5">{f.details.sessionEnd}</span></div>
+                                      <div><span className="text-slate-400">Baseline Timestamp:</span> <span className="font-mono text-slate-850 dark:text-surface-900 block mt-0.5">{f.details.baselineTimestamp}</span></div>
+                                      <div><span className="text-slate-400">Baseline Fuel Level:</span> <span className="font-bold text-slate-850 dark:text-surface-900 font-mono block mt-0.5">{f.details.baselineFuelPercent}%</span></div>
+                                      <div><span className="text-slate-400">Post-Fill Timestamp:</span> <span className="font-mono text-slate-850 dark:text-surface-900 block mt-0.5">{f.details.postFillTimestamp}</span></div>
+                                      <div><span className="text-slate-400">Post-Fill Fuel Level:</span> <span className="font-bold text-slate-850 dark:text-surface-900 font-mono block mt-0.5">{f.details.postFillFuelPercent}%</span></div>
+                                      <div><span className="text-slate-400">Observed Fuel Increase:</span> <span className="font-black text-brand-600 font-mono block mt-0.5">+{f.details.observedIncreasePercent} percentage points</span></div>
+                                      <div><span className="text-slate-400">Transaction Volume:</span> <span className="font-bold text-slate-850 dark:text-surface-900 font-mono block mt-0.5">{f.details.transactionLitres} Litres</span></div>
+                                      <div><span className="text-slate-400">Configured Tank Capacity:</span> <span className="font-mono text-slate-850 dark:text-surface-900 block mt-0.5">{f.details.tankCapacity} L</span></div>
+                                      <div><span className="text-slate-400">Expected Fill Percentage:</span> <span className="font-mono text-slate-850 dark:text-surface-900 block mt-0.5">~{f.details.expectedIncreasePercent}%</span></div>
+                                      <div><span className="text-slate-400">Observed vs Expected Diff:</span> <span className="font-mono text-slate-850 dark:text-surface-900 block mt-0.5">{f.details.differencePercent}%</span></div>
+                                      <div><span className="text-slate-400">Sensor Ceiling Status:</span> <span className="badge bg-slate-200 text-slate-800 text-4xs font-bold font-mono uppercase block mt-0.5 w-fit">{f.details.sensorCeilingStatus}</span></div>
+                                      <div><span className="text-slate-400">Telemetry Logs Used:</span> <span className="font-mono text-slate-850 dark:text-surface-900 block mt-0.5">{f.details.pointsUsedCount} points</span></div>
+                                      <div><span className="text-slate-400">Telemetry Logs Excluded:</span> <span className="font-mono text-slate-850 dark:text-surface-900 block mt-0.5">{f.details.pointsExcludedCount} points</span></div>
+                                      <div><span className="text-slate-400">Exclusion Reason:</span> <span className="text-slate-500 italic block mt-0.5">{f.details.reasonForExclusion}</span></div>
+                                      <div><span className="text-slate-400">Fuel Score Awarded:</span> <span className="font-bold text-slate-850 dark:text-surface-900 font-mono block mt-0.5">{f.details.finalFuelScore} / 25 pts</span></div>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <p className="text-3xs text-slate-505 mt-0.5 font-sans font-medium leading-relaxed">{f.explanation}</p>
+                                )}
                               </div>
                             ))}
                           </div>
@@ -342,7 +385,7 @@ export default function CheckResultDetailsPage() {
                       </div>
 
                       {/* Applied Config details */}
-                      <div className="flex flex-wrap gap-x-6 gap-y-1 text-3xs font-mono text-slate-400 mt-4 border-t border-slate-100 dark:border-surface-200 pt-3">
+                      <div className="flex flex-wrap gap-x-6 gap-y-1 text-3xs font-mono text-slate-450 mt-4 border-t border-slate-100 dark:border-surface-200 pt-3">
                         <p>Timezone Offset Applied: {r.timezoneApplied}</p>
                         <p>Time Tolerance Applied: {r.toleranceApplied}</p>
                         <p>Validation Ruleset Version: 1.0.0</p>

@@ -21,6 +21,7 @@ import {
   ProductType,
 } from '@/domain/types';
 import { generateId, normaliseStationCode } from '@/lib/utils';
+import { normalizeRegistration } from '@/config/fleet-registry';
 
 // ─── Default Configuration ─────────────────────────────────────────────────────
 
@@ -57,11 +58,13 @@ export function assessTransaction(
   tx: CanonicalTransaction,
   points: CanonicalTelematicsPoint[],
   station: CanonicalStation | null,
-  config: TelematicsConfig = DEFAULT_TELEMATICS_CONFIG
+  config: TelematicsConfig = DEFAULT_TELEMATICS_CONFIG,
+  allVehicleTransactions?: CanonicalTransaction[]
 ): TelematicsAssessment {
-  // Filter points for the correct vehicle
-  const vehiclePoints = points.filter(
-    (p) => p.vehicleRegistration === tx.registration
+  // Filter points for the correct vehicle (using normalized comparison)
+  const normTxReg = normalizeRegistration(tx.registration);
+  let vehiclePoints = points.filter(
+    (p) => normalizeRegistration(p.vehicleRegistration) === normTxReg
   );
 
   // If no telematics data at all, return insufficient evidence
@@ -69,51 +72,79 @@ export function assessTransaction(
     return makeInsufficientResult(tx, config, 'No telematics data found for vehicle ' + tx.registration);
   }
 
+  // Sort telemetry points in ascending timestamp order
+  vehiclePoints.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+  // Deduplicate identical timestamp/event points without losing relevant engine, ignition or location evidence.
+  const pointMap = new Map<string, CanonicalTelematicsPoint>();
+  for (const pt of vehiclePoints) {
+    if (!pt.timestamp) continue;
+    const ts = new Date(pt.timestamp).toISOString();
+    if (pointMap.has(ts)) {
+      const existing = pointMap.get(ts)!;
+      const merged: CanonicalTelematicsPoint = {
+        ...existing,
+        fuelLevelPercent: existing.fuelLevelPercent !== null ? existing.fuelLevelPercent : pt.fuelLevelPercent,
+        odometerKm: existing.odometerKm !== null ? existing.odometerKm : pt.odometerKm,
+        speedKmh: existing.speedKmh !== null ? existing.speedKmh : pt.speedKmh,
+        activity: [existing.activity, pt.activity].filter(Boolean).join('; '),
+        info: [existing.info, pt.info].filter(Boolean).join('; '),
+        locationCity: existing.locationCity || pt.locationCity,
+        locationTown: existing.locationTown || pt.locationTown,
+        locationStreet: existing.locationStreet || pt.locationStreet,
+        locationVillage: existing.locationVillage || pt.locationVillage,
+        locationAddress: existing.locationAddress || pt.locationAddress,
+        latitude: existing.latitude !== null ? existing.latitude : pt.latitude,
+        longitude: existing.longitude !== null ? existing.longitude : pt.longitude,
+      };
+      pointMap.set(ts, merged);
+    } else {
+      pointMap.set(ts, pt);
+    }
+  }
+  vehiclePoints = Array.from(pointMap.values());
+
   const txTime = new Date(tx.transactionTimestamp).getTime();
   if (isNaN(txTime)) {
     return makeInsufficientResult(tx, config, 'Transaction has no valid timestamp.');
   }
 
-  // Find points in the time window
+  // Find points in the time window (using standard timeWindowMinutes for standard window checks)
   const windowMs = config.timeWindowMinutes * 60 * 1000;
   const windowPoints = vehiclePoints.filter((p) => {
     const pTime = new Date(p.timestamp).getTime();
     return !isNaN(pTime) && Math.abs(pTime - txTime) <= windowMs;
-  }).sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  });
 
-  if (windowPoints.length === 0) {
-    return makeInsufficientResult(tx, config,
-      `No telematics points within ${config.timeWindowMinutes}min window of transaction.`
-    );
+  if (windowPoints.length === 0 && tx.productType !== ProductType.PARKING && tx.productType !== ProductType.TOLL) {
+    // If no points in standard window, but we are checking fuel, we might find a timezone-shifted session in vehiclePoints.
   }
 
   const factors: TelematicsFactorResult[] = [];
   let hasEnoughEvidence = true;
 
   // ─── Factor 1: Time Proximity ──────────────────────────
-  factors.push(assessTimeProximity(tx, windowPoints, config));
+  factors.push(assessTimeProximity(tx, windowPoints.length > 0 ? windowPoints : vehiclePoints, config));
 
   // ─── Factor 2: Location Proximity ──────────────────────
-  factors.push(assessLocationProximity(tx, windowPoints, station, config));
+  factors.push(assessLocationProximity(tx, windowPoints.length > 0 ? windowPoints : vehiclePoints, station, config));
 
   // ─── Factor 3: Fuel Level Movement ─────────────────────
-  const fuelFactor = assessFuelMovement(tx, windowPoints, config);
+  const fuelFactor = assessFuelMovement(tx, vehiclePoints, config, allVehicleTransactions);
   factors.push(fuelFactor);
-  if (fuelFactor.result === 'SKIP') {
-    // Missing fuel data — don't count as evidence gap for non-fuel products
-    if (tx.productType === ProductType.DIESEL || tx.productType === ProductType.GNR) {
-      // For fuel products, missing fuel sensor reduces confidence
-    }
-  }
+
+  // Extract variables for volume consistency to check sensor ceiling
+  const sensorCeilingReached = fuelFactor.details?.sensorCeilingStatus === 'Capped';
+  const observedIncreasePercent = fuelFactor.details?.observedIncreasePercent || 0;
 
   // ─── Factor 4: Stop/Engine Behaviour ───────────────────
-  factors.push(assessStopBehaviour(windowPoints, config));
+  factors.push(assessStopBehaviour(windowPoints.length > 0 ? windowPoints : vehiclePoints, config));
 
   // ─── Factor 5: Volume Consistency ──────────────────────
-  factors.push(assessVolumeConsistency(tx, windowPoints, config));
+  factors.push(assessVolumeConsistency(tx, windowPoints.length > 0 ? windowPoints : vehiclePoints, config, sensorCeilingReached, observedIncreasePercent));
 
   // ─── Factor 6: Odometer Consistency ────────────────────
-  factors.push(assessOdometerConsistency(tx, windowPoints));
+  factors.push(assessOdometerConsistency(tx, windowPoints.length > 0 ? windowPoints : vehiclePoints));
 
   // Calculate total score
   const totalScore = factors.reduce((sum, f) => sum + f.awardedPoints, 0);
@@ -196,7 +227,7 @@ function assessLocationProximity(
 ): TelematicsFactorResult {
   const maxPts = config.weights[ConfidenceDimension.LOCATION_PROXIMITY];
 
-  // Text-based location matching (our GPS file has no coordinates)
+  // Text-based location matching
   const stationCity = (tx.stationCity || tx.stationName || '').toLowerCase();
   const stationCountry = (tx.serviceCountry || '').toLowerCase();
 
@@ -258,16 +289,28 @@ function assessLocationProximity(
   };
 }
 
+function getMedian(arr: number[]): number {
+  if (arr.length === 0) return 0;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) {
+    return (sorted[mid - 1]! + sorted[mid]!) / 2;
+  }
+  return sorted[mid]!;
+}
+
 function assessFuelMovement(
   tx: CanonicalTransaction,
-  points: CanonicalTelematicsPoint[],
-  config: TelematicsConfig
+  vehiclePoints: CanonicalTelematicsPoint[],
+  config: TelematicsConfig,
+  allVehicleTransactions?: CanonicalTransaction[]
 ): TelematicsFactorResult {
   const maxPts = config.weights[ConfidenceDimension.FUEL_LEVEL_MOVEMENT];
 
   // Skip for non-fuel products
   if (tx.productType === ProductType.PARKING || tx.productType === ProductType.TOLL ||
-      tx.productType === ProductType.WASH || tx.productType === ProductType.SERVICE_FEE) {
+      tx.productType === ProductType.WASH || tx.productType === ProductType.SERVICE_FEE ||
+      tx.productType === ProductType.PASSANGO) {
     return {
       dimension: ConfidenceDimension.FUEL_LEVEL_MOVEMENT,
       maxPoints: maxPts,
@@ -294,8 +337,82 @@ function assessFuelMovement(
     };
   }
 
-  // Look for fuel level readings
-  const withFuel = points.filter((p) => p.fuelLevelPercent !== null);
+  // Find pivotPoint: stationary point closest to transaction time
+  const txTime = new Date(tx.transactionTimestamp).getTime();
+  const alignmentWindowMs = 180 * 60 * 1000; // +/- 180 minutes to align timezone
+
+  const stationCity = (tx.stationCity || tx.stationName || '').toLowerCase();
+  const getLocScore = (p: CanonicalTelematicsPoint) => {
+    const allLocationText = [
+      p.locationCity, p.locationTown, p.locationStreet,
+      p.locationVillage, p.locationAddress,
+    ].join(' ').toLowerCase();
+    let score = 0;
+    if (stationCity && allLocationText.includes(stationCity)) score += 2;
+    if (tx.stationName && allLocationText.includes(tx.stationName.toLowerCase())) score += 1;
+    return score;
+  };
+
+  const nearbyPoints = vehiclePoints.filter((p) => {
+    const pTime = new Date(p.timestamp).getTime();
+    return !isNaN(pTime) && Math.abs(pTime - txTime) <= alignmentWindowMs;
+  });
+
+  const stationaryPoints = nearbyPoints.filter((p) => {
+    const speed = p.speedKmh;
+    const act = (p.activity || '').toLowerCase();
+    const info = (p.info || '').toLowerCase();
+    return (speed !== null && speed <= 1) ||
+      act.includes('standstill') || act.includes('stop') || act.includes('rest') || act.includes('off') ||
+      info.includes('standstill') || info.includes('stop') || info.includes('rest') || info.includes('off');
+  });
+
+  let pivotPoint: CanonicalTelematicsPoint | null = null;
+  if (stationaryPoints.length > 0) {
+    // Prefer points with location match
+    const withLoc = stationaryPoints.filter(p => getLocScore(p) > 0);
+    const candidates = withLoc.length > 0 ? withLoc : stationaryPoints;
+    
+    // Pick the one closest to txTime
+    let minDiff = Infinity;
+    for (const p of candidates) {
+      const diff = Math.abs(new Date(p.timestamp).getTime() - txTime);
+      if (diff < minDiff) {
+        minDiff = diff;
+        pivotPoint = p;
+      }
+    }
+  }
+
+  if (!pivotPoint && nearbyPoints.length > 0) {
+    let minDiff = Infinity;
+    for (const p of nearbyPoints) {
+      const diff = Math.abs(new Date(p.timestamp).getTime() - txTime);
+      if (diff < minDiff) {
+        minDiff = diff;
+        pivotPoint = p;
+      }
+    }
+  }
+
+  const alignedTxTime = pivotPoint ? new Date(pivotPoint.timestamp).getTime() : txTime;
+
+  // Build the session window: 90 min before to 120 min after aligned time
+  const windowStart = alignedTxTime - 90 * 60 * 1000;
+  const windowEnd = alignedTxTime + 120 * 60 * 1000;
+
+  const sessionPoints = vehiclePoints.filter((p) => {
+    const pTime = new Date(p.timestamp).getTime();
+    return !isNaN(pTime) && pTime >= windowStart && pTime <= windowEnd;
+  });
+
+  const excludedPoints = vehiclePoints.filter((p) => {
+    const pTime = new Date(p.timestamp).getTime();
+    return !isNaN(pTime) && (pTime < windowStart || pTime > windowEnd);
+  });
+
+  const withFuel = sessionPoints.filter((p) => p.fuelLevelPercent !== null);
+
   if (withFuel.length < 2) {
     return {
       dimension: ConfidenceDimension.FUEL_LEVEL_MOVEMENT,
@@ -303,81 +420,134 @@ function assessFuelMovement(
       awardedPoints: 0,
       sourceValue: `${withFuel.length} readings`,
       normalisedValue: '',
-      rule: 'Need at least 2 fuel level readings for comparison',
+      rule: 'Need at least 2 fuel level readings in session for comparison',
       result: 'SKIP',
-      explanation: 'Insufficient fuel level readings to assess fuel movement.',
+      explanation: 'Insufficient fuel level readings in the session to assess fuel movement.',
+      details: {
+        transactionTimestamp: tx.transactionTimestamp,
+        timezoneApplied: 'Aligned to telemetry standstill',
+        sessionStart: new Date(windowStart).toISOString(),
+        sessionEnd: new Date(windowEnd).toISOString(),
+        pointsUsedCount: sessionPoints.length,
+        pointsExcludedCount: excludedPoints.length,
+        reasonForExclusion: 'Outside session window',
+        finalFuelScore: 0,
+        plainEnglishConclusion: 'Insufficient telemetry points to verify fuel movement.',
+      }
     };
   }
 
-  // Find readings before and after the transaction
-  const txTime = new Date(tx.transactionTimestamp).getTime();
-  const before = withFuel
-    .filter((p) => new Date(p.timestamp).getTime() <= txTime)
-    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-  const after = withFuel
-    .filter((p) => new Date(p.timestamp).getTime() > txTime)
-    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  // Find the largest positive jump in fuelPoints
+  let maxDiff = -1;
+  let bestPreIdx = -1;
+  let bestPostIdx = -1;
 
-  if (before.length === 0 || after.length === 0) {
-    return {
-      dimension: ConfidenceDimension.FUEL_LEVEL_MOVEMENT,
-      maxPoints: maxPts,
-      awardedPoints: Math.round(maxPts * 0.3),
-      sourceValue: `before:${before.length} after:${after.length}`,
-      normalisedValue: '',
-      rule: 'Need readings both before and after transaction',
-      result: 'PARTIAL',
-      explanation: 'Fuel readings only available on one side of the transaction time.',
-    };
+  for (let a = 0; a < withFuel.length; a++) {
+    for (let b = a + 1; b < withFuel.length; b++) {
+      const diff = withFuel[b]!.fuelLevelPercent! - withFuel[a]!.fuelLevelPercent!;
+      if (diff > maxDiff) {
+        maxDiff = diff;
+        bestPreIdx = a;
+        bestPostIdx = b;
+      }
+    }
   }
 
-  const firstBefore = before[0];
-  const firstAfter = after[0];
-  if (!firstBefore || !firstAfter) {
-    return {
-      dimension: ConfidenceDimension.FUEL_LEVEL_MOVEMENT,
-      maxPoints: maxPts,
-      awardedPoints: 0,
-      sourceValue: `before:${before.length} after:${after.length}`,
-      normalisedValue: '',
-      rule: 'Need readings both before and after transaction',
-      result: 'SKIP',
-      explanation: 'Fuel readings only available on one side of the transaction time.',
-    };
+  // Default values if no positive jump
+  let baselineFuelPercent = withFuel[0]!.fuelLevelPercent!;
+  let postFillFuelPercent = withFuel[withFuel.length - 1]!.fuelLevelPercent!;
+  let observedIncreasePercent = postFillFuelPercent - baselineFuelPercent;
+  let baselineTimestamp = withFuel[0]!.timestamp;
+  let postFillTimestamp = withFuel[withFuel.length - 1]!.timestamp;
+
+  if (maxDiff > 0 && bestPreIdx !== -1 && bestPostIdx !== -1) {
+    // Pre-jump points: stationary/pre-restart points before the post-jump index
+    const preJumpPoints = withFuel.slice(0, bestPostIdx);
+    const preJumpStationary = preJumpPoints.filter(p => {
+      const speed = p.speedKmh;
+      const act = (p.activity || '').toLowerCase();
+      return (speed !== null && speed <= 1) || act.includes('standstill') || act.includes('stop') || act.includes('rest') || act.includes('off');
+    });
+    const baselineCandidates = preJumpStationary.length > 0 ? preJumpStationary : preJumpPoints;
+    baselineFuelPercent = getMedian(baselineCandidates.map(p => p.fuelLevelPercent!));
+    baselineTimestamp = baselineCandidates[baselineCandidates.length - 1]!.timestamp || withFuel[bestPreIdx]!.timestamp;
+
+    // Post-jump points: first few points starting from post-jump index
+    const postJumpPoints = withFuel.slice(bestPostIdx);
+    postFillFuelPercent = getMedian(postJumpPoints.slice(0, 5).map(p => p.fuelLevelPercent!));
+    postFillTimestamp = postJumpPoints[0]!.timestamp;
+
+    observedIncreasePercent = postFillFuelPercent - baselineFuelPercent;
   }
 
-  const fuelBefore = firstBefore.fuelLevelPercent!;
-  const fuelAfter = firstAfter.fuelLevelPercent!;
-  const increase = fuelAfter - fuelBefore;
+  // Aggregate diesel litres for multiple transactions in the same stop window
+  let aggregatedLitres = parseFloat(tx.quantity || '0');
+  if (allVehicleTransactions) {
+    const sameSessionTxs = allVehicleTransactions.filter((other) => {
+      if (other.id === tx.id) return false;
+      if (other.productType !== ProductType.DIESEL && other.productType !== ProductType.GNR) return false;
+      const otherTime = new Date(other.transactionTimestamp).getTime();
+      return otherTime >= windowStart && otherTime <= windowEnd;
+    });
+    for (const sTx of sameSessionTxs) {
+      aggregatedLitres += parseFloat(sTx.quantity || '0');
+    }
+  }
 
-  // For a refuelling, we expect an increase
+  const tankCapacity = 1200; // 1200L default Actros
+  const expectedPercentIncrease = (aggregatedLitres / tankCapacity) * 100;
+  const difference = Math.abs(observedIncreasePercent - expectedPercentIncrease);
+  const sensorCeilingReached = postFillFuelPercent >= 99.5;
+
   let awarded: number;
   let result: 'PASS' | 'PARTIAL' | 'FAIL';
 
-  if (increase > config.fuelLevelDropThresholdPercent) {
+  if (observedIncreasePercent > config.fuelLevelDropThresholdPercent) {
     awarded = maxPts;
     result = 'PASS';
-  } else if (increase > 0) {
+  } else if (observedIncreasePercent > 0) {
     awarded = Math.round(maxPts * 0.6);
     result = 'PARTIAL';
-  } else if (fuelAfter >= 95) {
-    // Sensor may be capped at 100%
+  } else if (sensorCeilingReached) {
     awarded = Math.round(maxPts * 0.5);
     result = 'PARTIAL';
   } else {
-    awarded = Math.round(maxPts * 0.1);
+    awarded = 0;
     result = 'FAIL';
   }
+
+  const plainEnglishConclusion = `Fuel movement detected. The stable fuel reading increased from approximately ${Math.round(baselineFuelPercent)}% before refuelling to ${Math.round(postFillFuelPercent)}% after the vehicle restarted, an observed increase of ${Math.round(observedIncreasePercent)} percentage points. The ${aggregatedLitres.toFixed(2)}-litre transaction represents approximately ${expectedPercentIncrease.toFixed(1)}% of the configured 1,200-litre tank. The vehicle was at ${tx.stationCity || tx.stationName || 'the station'} and was stationary during the event. ${sensorCeilingReached ? 'The sensor reached its 100% ceiling, so exact volume agreement cannot be confirmed, but the telemetry strongly supports a refuelling event.' : 'The telemetry supports the refuelling event.'}`;
 
   return {
     dimension: ConfidenceDimension.FUEL_LEVEL_MOVEMENT,
     maxPoints: maxPts,
     awardedPoints: awarded,
-    sourceValue: `${fuelBefore}% → ${fuelAfter}%`,
-    normalisedValue: `+${increase.toFixed(1)}%`,
+    sourceValue: `${Math.round(baselineFuelPercent)}% → ${Math.round(postFillFuelPercent)}%`,
+    normalisedValue: `+${observedIncreasePercent.toFixed(1)}%`,
     rule: `Expect increase >${config.fuelLevelDropThresholdPercent}% for fuel transaction`,
     result,
-    explanation: `Fuel level changed from ${fuelBefore}% to ${fuelAfter}% (${increase > 0 ? '+' : ''}${increase.toFixed(1)}%).`,
+    explanation: plainEnglishConclusion,
+    details: {
+      transactionTimestamp: tx.transactionTimestamp,
+      timezoneApplied: pivotPoint ? 'Aligned to telemetry standstill' : 'UTC',
+      sessionStart: new Date(windowStart).toISOString(),
+      sessionEnd: new Date(windowEnd).toISOString(),
+      baselineTimestamp,
+      baselineFuelPercent: parseFloat(baselineFuelPercent.toFixed(2)),
+      postFillTimestamp,
+      postFillFuelPercent: parseFloat(postFillFuelPercent.toFixed(2)),
+      observedIncreasePercent: parseFloat(observedIncreasePercent.toFixed(2)),
+      transactionLitres: parseFloat(aggregatedLitres.toFixed(2)),
+      tankCapacity,
+      expectedIncreasePercent: parseFloat(expectedPercentIncrease.toFixed(2)),
+      differencePercent: parseFloat(difference.toFixed(2)),
+      sensorCeilingStatus: sensorCeilingReached ? 'Capped' : 'Normal',
+      pointsUsedCount: sessionPoints.length,
+      pointsExcludedCount: excludedPoints.length,
+      reasonForExclusion: 'Outside session window',
+      finalFuelScore: awarded,
+      plainEnglishConclusion,
+    }
   };
 }
 
@@ -426,7 +596,9 @@ function assessStopBehaviour(
 function assessVolumeConsistency(
   tx: CanonicalTransaction,
   points: CanonicalTelematicsPoint[],
-  config: TelematicsConfig
+  config: TelematicsConfig,
+  sensorCeilingReached?: boolean,
+  observedIncreasePercent?: number
 ): TelematicsFactorResult {
   const maxPts = config.weights[ConfidenceDimension.VOLUME_CONSISTENCY];
 
@@ -463,17 +635,27 @@ function assessVolumeConsistency(
   const expectedPercentIncrease = (litres / tankCapacity) * 100;
   const isPlausible = litres <= tankCapacity;
 
+  let awarded = isPlausible ? maxPts : 0;
+  let explanation = '';
+  let result: 'PASS' | 'PARTIAL' | 'FAIL' = isPlausible ? 'PASS' : 'FAIL';
+
+  if (sensorCeilingReached && isPlausible) {
+    explanation = `${litres}L is plausible; sensor reached 100% ceiling. Expected ${expectedPercentIncrease.toFixed(1)}% fill vs observed ${observedIncreasePercent?.toFixed(1)}% (capped).`;
+  } else if (isPlausible) {
+    explanation = `${litres}L is plausible for a ${tankCapacity}L tank (${expectedPercentIncrease.toFixed(1)}% fill).`;
+  } else {
+    explanation = `${litres}L exceeds tank capacity of ${tankCapacity}L.`;
+  }
+
   return {
     dimension: ConfidenceDimension.VOLUME_CONSISTENCY,
     maxPoints: maxPts,
-    awardedPoints: isPlausible ? maxPts : 0,
+    awardedPoints: awarded,
     sourceValue: `${litres}L`,
     normalisedValue: `${expectedPercentIncrease.toFixed(1)}% of ${tankCapacity}L tank`,
     rule: `Volume must not exceed tank capacity (${tankCapacity}L default)`,
-    result: isPlausible ? 'PASS' : 'FAIL',
-    explanation: isPlausible
-      ? `${litres}L is plausible for a ${tankCapacity}L tank (${expectedPercentIncrease.toFixed(1)}% fill).`
-      : `${litres}L exceeds tank capacity of ${tankCapacity}L.`,
+    result,
+    explanation,
   };
 }
 

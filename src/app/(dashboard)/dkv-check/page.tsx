@@ -1,8 +1,7 @@
 'use client';
-
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Upload, ChevronRight, AlertTriangle, CheckCircle2, FileText, ArrowRight, ShieldAlert, Loader2 } from 'lucide-react';
+import { Upload, ChevronRight, AlertTriangle, CheckCircle2, FileText, ArrowRight, ShieldAlert, Loader2, RefreshCw, XCircle, Info, Landmark, MapPin, Gauge } from 'lucide-react';
 import { useDropzone } from 'react-dropzone';
 
 export default function DKVCheckPage() {
@@ -13,18 +12,22 @@ export default function DKVCheckPage() {
 
   // Step 1: DKV File
   const [dkvFile, setDkvFile] = useState<File | null>(null);
-  const [dkvMeta, setDkvMeta] = useState<any>(null);
+  const [uploadSummary, setUploadSummary] = useState<any>(null);
 
   // Step 2: GPS File
   const [gpsFile, setGpsFile] = useState<File | null>(null);
-  const [gpsMeta, setGpsMeta] = useState<any>(null);
+  const [gpsSummary, setGpsSummary] = useState<any>(null);
 
-  // Step 3: Vehicle Selection & Run
+  // Step 3: Run Check Target
   const [selectedVehicle, setSelectedVehicle] = useState('');
 
   // Dropzone DKV
   const { getRootProps: getDkvProps, getInputProps: getDkvInput, isDragActive: dkvActive } = useDropzone({
-    accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'], 'application/vnd.ms-excel': ['.xls'], 'text/csv': ['.csv'] },
+    accept: {
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+      'application/vnd.ms-excel': ['.xls'],
+      'text/csv': ['.csv'],
+    },
     multiple: false,
     onDrop: async (accepted) => {
       const file = accepted[0];
@@ -34,7 +37,6 @@ export default function DKVCheckPage() {
 
       const formData = new FormData();
       formData.append('file', file);
-      // Auto-detect based on file name or specify DKV
       formData.append('type', file.name.toLowerCase().includes('invoice') ? 'DKV Invoice' : 'DKV Transactions');
 
       try {
@@ -43,29 +45,19 @@ export default function DKVCheckPage() {
           body: formData,
         });
         const data = await res.json();
-        if (data.fileId) {
-          // Fetch transactions to compute meta details
-          const txRes = await fetch(`/api/entities?type=${file.name.toLowerCase().includes('invoice') ? 'invoice_transactions' : 'transactions'}`);
-          const txList = await txRes.json();
-          const fileTxs = txList.filter((t: any) => t.importFileId === data.fileId);
-
-          const regs = Array.from(new Set(fileTxs.map((t: any) => t.registration).filter(Boolean)));
-          const dates = fileTxs.map((t: any) => t.transactionDate).filter(Boolean).sort();
-          
-          setDkvMeta({
+        if (data.fileId && data.uploadSummary) {
+          setUploadSummary({
             fileId: data.fileId,
-            rowCount: fileTxs.length,
-            vehicles: regs,
-            dateRange: dates.length > 0 ? `${dates[0]} to ${dates[dates.length - 1]}` : 'Unknown',
-            warnings: data.importFile?.metadata?.warnings || [],
+            ...data.uploadSummary,
           });
-          setStep(2);
         } else {
           alert(data.error || 'Parsing failed');
+          setDkvFile(null);
         }
       } catch (err) {
         console.error(err);
         alert('File upload failed');
+        setDkvFile(null);
       } finally {
         setLoading(false);
       }
@@ -74,7 +66,10 @@ export default function DKVCheckPage() {
 
   // Dropzone GPS
   const { getRootProps: getGpsProps, getInputProps: getGpsInput, isDragActive: gpsActive } = useDropzone({
-    accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'], 'application/vnd.ms-excel': ['.xls'] },
+    accept: {
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+      'application/vnd.ms-excel': ['.xls'],
+    },
     multiple: false,
     onDrop: async (accepted) => {
       const file = accepted[0];
@@ -92,28 +87,20 @@ export default function DKVCheckPage() {
           body: formData,
         });
         const data = await res.json();
-        if (data.fileId) {
-          // Fetch GPS points to extract meta
-          const ptsRes = await fetch('/api/telematics');
-          const ptsData = await ptsRes.json();
-          // Filter points in database or just fetch points
-          const filePts = data.importFile?.row_count || 100; // fallback
-
-          setGpsMeta({
+        if (data.fileId && data.gpsSummary) {
+          setGpsSummary({
             fileId: data.fileId,
-            vehicle: data.importFile?.file_name.includes('GPS 1') ? '241MH2362' : '241MH2362', // from spec vehicle
-            pointsCount: filePts,
-            hasFuel: true,
-            hasLoc: true,
+            ...data.gpsSummary,
           });
-          setSelectedVehicle('241MH2362'); // default to DKV vehicle from spec
-          setStep(3);
+          setSelectedVehicle(data.gpsSummary.detectedCanonicalRegistration || '');
         } else {
-          alert(data.error || 'Parsing failed');
+          alert(data.error || 'GPS parsing failed');
+          setGpsFile(null);
         }
       } catch (err) {
         console.error(err);
         alert('GPS upload failed');
+        setGpsFile(null);
       } finally {
         setLoading(false);
       }
@@ -121,7 +108,7 @@ export default function DKVCheckPage() {
   });
 
   const handleRunCheck = async () => {
-    if (!dkvMeta?.fileId || !gpsMeta?.fileId || !selectedVehicle) return;
+    if (!uploadSummary?.fileId || !gpsSummary?.fileId || !selectedVehicle) return;
     setSubmitting(true);
 
     try {
@@ -129,8 +116,8 @@ export default function DKVCheckPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          transactionFileId: dkvMeta.fileId,
-          gpsFileId: gpsMeta.fileId,
+          transactionFileId: uploadSummary.fileId,
+          gpsFileId: gpsSummary.fileId,
           selectedVehicle,
           provider: 'DKV',
         }),
@@ -150,15 +137,25 @@ export default function DKVCheckPage() {
     }
   };
 
+  const resetDkv = () => {
+    setDkvFile(null);
+    setUploadSummary(null);
+  };
+
+  const resetGps = () => {
+    setGpsFile(null);
+    setGpsSummary(null);
+  };
+
   return (
-    <div className="max-w-xl mx-auto py-6 space-y-6 text-slate-800 dark:text-surface-900 animate-fade-in">
+    <div className="max-w-4xl mx-auto py-6 space-y-6 text-slate-800 dark:text-surface-900 animate-fade-in">
       <div>
-        <h1 className="text-xl font-bold text-slate-900 dark:text-surface-950">DKV Transaction Check</h1>
+        <h1 className="text-2xl font-black text-slate-900 dark:text-surface-950 tracking-tight">DKV Transaction Check</h1>
         <p className="text-xs text-slate-500 dark:text-surface-600 mt-1">Guided workflow to compare DKV charges against vehicle telemetry</p>
       </div>
 
       {/* Progress Indicators */}
-      <div className="flex items-center gap-4 bg-slate-100 dark:bg-surface-50 p-3 rounded-xl border border-slate-200 dark:border-surface-300">
+      <div className="flex items-center gap-4 bg-slate-100 dark:bg-surface-55 p-3 rounded-xl border border-slate-200 dark:border-surface-300">
         {[
           { num: 1, label: 'Upload DKV' },
           { num: 2, label: 'Upload GPS' },
@@ -179,7 +176,7 @@ export default function DKVCheckPage() {
 
       {/* Loading state */}
       {loading && (
-        <div className="card flex flex-col items-center justify-center py-12 space-y-3">
+        <div className="card flex flex-col items-center justify-center py-16 space-y-3">
           <Loader2 className="h-8 w-8 text-brand-600 animate-spin" />
           <p className="text-xs text-slate-500">Processing and parsing file content...</p>
         </div>
@@ -189,27 +186,152 @@ export default function DKVCheckPage() {
         <>
           {/* STEP 1: UPLOAD DKV */}
           {step === 1 && (
-            <div className="space-y-4">
-              <div {...getDkvProps()} className={`card border-2 border-dashed flex flex-col items-center justify-center py-16 text-center cursor-pointer transition ${
-                dkvActive ? 'border-brand-500 bg-brand-500/5' : 'border-slate-350 dark:border-surface-300 hover:bg-slate-50 dark:hover:bg-surface-50'
-              }`}>
-                <input {...getDkvInput()} />
-                <Upload className="h-8 w-8 text-slate-400 mb-3" />
-                <p className="text-xs font-bold text-slate-800 dark:text-surface-950">Drag and drop DKV transaction report here</p>
-                <p className="text-3xs text-slate-400 mt-1">Supports XLSX, XLS, and CSV files</p>
-              </div>
-
-              {dkvMeta && (
-                <div className="card bg-slate-50 dark:bg-surface-50 space-y-2 text-xs">
-                  <div className="flex justify-between border-b border-slate-200 dark:border-surface-300 pb-2">
-                    <span className="font-semibold text-slate-800 dark:text-surface-950">File Selected:</span>
-                    <span className="font-mono text-slate-600">{dkvFile?.name}</span>
+            <div className="space-y-6">
+              {!uploadSummary ? (
+                <div {...getDkvProps()} className={`card border-2 border-dashed flex flex-col items-center justify-center py-20 text-center cursor-pointer transition ${
+                  dkvActive ? 'border-brand-500 bg-brand-500/5' : 'border-slate-350 dark:border-surface-300 hover:bg-slate-50 dark:hover:bg-surface-50'
+                }`}>
+                  <input {...getDkvInput()} />
+                  <Upload className="h-10 w-10 text-slate-400 mb-3" />
+                  <p className="text-sm font-bold text-slate-800 dark:text-surface-950">Drag and drop DKV transaction report here</p>
+                  <p className="text-2xs text-slate-400 mt-1">Supports XLSX, XLS, and CSV files</p>
+                </div>
+              ) : (
+                <div className="space-y-6 animate-slide-down">
+                  {/* Summary Dashboard */}
+                  <div className="flex justify-between items-center bg-slate-100 dark:bg-surface-50 p-4 rounded-xl border border-slate-200 dark:border-surface-300">
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900 dark:text-surface-950">File Upload Summary</h3>
+                      <p className="text-3xs text-slate-500">Successfully loaded {uploadSummary.fileOverview.fileName}</p>
+                    </div>
+                    <button onClick={resetDkv} className="btn btn-secondary py-1.5 px-3 text-3xs font-semibold flex items-center gap-1">
+                      <RefreshCw className="h-3 w-3" /> Re-upload
+                    </button>
                   </div>
-                  <p><span className="text-slate-400">Transactions Detected:</span> {dkvMeta.rowCount}</p>
-                  <p><span className="text-slate-400">Vehicles Scanned:</span> {dkvMeta.vehicles.join(', ') || 'None'}</p>
-                  <p><span className="text-slate-400">Date Range:</span> {dkvMeta.dateRange}</p>
-                  <button onClick={() => setStep(2)} className="btn btn-primary w-full text-xs font-semibold py-2.5 mt-2 flex items-center justify-center gap-1">
-                    Continue to Step 2 <ChevronRight className="h-3.5 w-3.5" />
+
+                  {/* File Overview Grid */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    {[
+                      { label: 'Provider', val: uploadSummary.fileOverview.provider },
+                      { label: 'Document Type', val: uploadSummary.fileOverview.documentType },
+                      { label: 'Sheets / Pages', val: uploadSummary.fileOverview.pageOrSheetCount },
+                      { label: 'Total Rows', val: uploadSummary.fileOverview.totalTransactionRows },
+                    ].map((item, idx) => (
+                      <div key={idx} className="card p-3.5 space-y-1">
+                        <span className="text-3xs font-semibold text-slate-400 uppercase tracking-wider">{item.label}</span>
+                        <p className="text-xs font-bold text-slate-950">{item.val}</p>
+                      </div>
+                    ))}
+                  </div>
+
+                  {uploadSummary.fileOverview.parsingWarnings.length > 0 && (
+                    <div className="flex gap-2.5 p-3.5 bg-amber-500/10 border border-amber-300 rounded-xl text-amber-700 text-xs">
+                      <AlertTriangle className="h-4.5 w-4.5 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-bold">Parsing Warnings Detected</p>
+                        <ul className="list-disc pl-4 mt-1 space-y-1">
+                          {uploadSummary.fileOverview.parsingWarnings.map((w: string, i: number) => (
+                            <li key={i}>{w}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Fleet Vehicles Found */}
+                  <div className="space-y-3">
+                    <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Fleet Vehicles Identified</h4>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      {uploadSummary.fleetVehiclesFound.map((v: any, idx: number) => (
+                        <div key={idx} className="card p-4 space-y-3 border-l-4 border-l-brand-600">
+                          <div className="flex justify-between items-start">
+                            <div>
+                              <span className="text-xs font-black font-mono tracking-tight bg-slate-100 dark:bg-surface-200 px-2 py-0.5 rounded text-slate-800 dark:text-surface-950">{v.registration}</span>
+                              <p className="text-3xs text-slate-400 mt-1">{v.make} {v.model}</p>
+                            </div>
+                            <span className="badge bg-brand-500/10 text-brand-600 text-3xs font-semibold">{v.chargeCount} charges</span>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-y-2 gap-x-4 text-3xs text-slate-500">
+                            <div>
+                              <span className="block text-4xs font-bold text-slate-400 uppercase">Litres</span>
+                              <span className="text-slate-800 font-medium">
+                                {Object.entries(v.fuelLitresByProduct).map(([prod, lit]) => `${lit}L (${prod})`).join(', ') || '0L'}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="block text-4xs font-bold text-slate-400 uppercase">Monetary Total</span>
+                              <span className="text-slate-800 font-bold font-mono">
+                                {Object.entries(v.monetaryTotalsByCurrency).map(([curr, amt]: any) => `${curr} ${amt.toFixed(2)}`).join(', ')}
+                              </span>
+                            </div>
+                            <div className="col-span-2">
+                              <span className="block text-4xs font-bold text-slate-400 uppercase">Countries / Regions</span>
+                              <span className="text-slate-700 truncate block">{v.countries.join(', ')} ({v.stations.length} stations)</span>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Charge Breakdown */}
+                  <div className="space-y-3">
+                    <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Charge Category Breakdown</h4>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                      {uploadSummary.chargeBreakdown.map((c: any, idx: number) => (
+                        <div key={idx} className="card p-3.5 space-y-2">
+                          <div className="flex justify-between items-center">
+                            <span className="text-xs font-bold text-slate-850">{c.category}</span>
+                            <span className="badge bg-slate-100 dark:bg-surface-200 text-slate-600 text-4xs font-bold">{c.chargeCount} txs</span>
+                          </div>
+                          <div className="text-3xs text-slate-500 space-y-1">
+                            <p><span className="text-slate-400">Total Qty:</span> {c.totalQuantity.toFixed(2)}</p>
+                            <p><span className="text-slate-400">Total Amt:</span> {Object.entries(c.totalAmountByCurrency).map(([curr, val]: any) => `${curr} ${val.toFixed(2)}`).join(', ')}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Non-fleet Registrations */}
+                  {uploadSummary.nonFleetVehicles.length > 0 && (
+                    <div className="space-y-2 p-4 bg-red-500/5 border border-red-200 rounded-xl">
+                      <div className="flex items-center gap-1.5 text-red-600 font-bold text-xs">
+                        <XCircle className="h-4.5 w-4.5" />
+                        <span>Registrations found that are not on the current fleet list</span>
+                      </div>
+                      <div className="max-h-36 overflow-y-auto text-3xs text-slate-500 mt-2 space-y-1">
+                        {uploadSummary.nonFleetVehicles.map((n: any, idx: number) => (
+                          <div key={idx} className="flex justify-between border-b border-red-500/5 pb-1">
+                            <span className="font-mono font-bold text-slate-700">{n.rawRegistration} (Normalized: {n.normalizedRegistration})</span>
+                            <span className="text-slate-400">{n.source}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Unassigned Charges */}
+                  {uploadSummary.unassignedCharges.length > 0 && (
+                    <div className="space-y-2 p-4 bg-slate-100 dark:bg-surface-50 border border-slate-200 rounded-xl">
+                      <div className="flex items-center gap-1.5 text-slate-600 dark:text-surface-700 font-bold text-xs">
+                        <Info className="h-4.5 w-4.5" />
+                        <span>Unassigned charges (No registration found on row)</span>
+                      </div>
+                      <div className="max-h-36 overflow-y-auto text-3xs text-slate-500 mt-2 space-y-1 font-mono">
+                        {uploadSummary.unassignedCharges.map((un: any, idx: number) => (
+                          <div key={idx} className="flex justify-between border-b border-slate-200 pb-1">
+                            <span>{un.date} - {un.productName} ({un.quantity}L) - {un.stationName}</span>
+                            <span className="font-bold">{un.paymentCurrency} {parseFloat(un.amountGross).toFixed(2)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <button onClick={() => setStep(2)} className="btn btn-primary w-full text-xs font-semibold py-3 flex items-center justify-center gap-1">
+                    Continue to Step 2: Upload GPS Telematics <ChevronRight className="h-4 w-4" />
                   </button>
                 </div>
               )}
@@ -218,94 +340,193 @@ export default function DKVCheckPage() {
 
           {/* STEP 2: UPLOAD GPS */}
           {step === 2 && (
-            <div className="space-y-4">
-              <div {...getGpsProps()} className={`card border-2 border-dashed flex flex-col items-center justify-center py-16 text-center cursor-pointer transition ${
-                gpsActive ? 'border-brand-500 bg-brand-500/5' : 'border-slate-350 dark:border-surface-300 hover:bg-slate-50 dark:hover:bg-surface-50'
-              }`}>
-                <input {...getGpsInput()} />
-                <Upload className="h-8 w-8 text-slate-400 mb-3" />
-                <p className="text-xs font-bold text-slate-800 dark:text-surface-950">Drag and drop vehicle GPS report here</p>
-                <p className="text-3xs text-slate-400 mt-1">Supports XLS, XLSX formatted telemetry files</p>
-              </div>
-
-              <div className="flex gap-2">
-                <button onClick={() => setStep(1)} className="btn btn-secondary w-full py-2.5 text-xs">
-                  Back to Step 1
-                </button>
-                {gpsMeta && (
-                  <button onClick={() => setStep(3)} className="btn btn-primary w-full py-2.5 text-xs font-semibold flex items-center justify-center gap-1">
-                    Continue to Step 3 <ChevronRight className="h-3.5 w-3.5" />
+            <div className="space-y-6">
+              {!gpsSummary ? (
+                <div className="space-y-4">
+                  <div {...getGpsProps()} className={`card border-2 border-dashed flex flex-col items-center justify-center py-20 text-center cursor-pointer transition ${
+                    gpsActive ? 'border-brand-500 bg-brand-500/5' : 'border-slate-350 dark:border-surface-300 hover:bg-slate-50 dark:hover:bg-surface-50'
+                  }`}>
+                    <input {...getGpsInput()} />
+                    <Upload className="h-10 w-10 text-slate-400 mb-3" />
+                    <p className="text-sm font-bold text-slate-800 dark:text-surface-950">Drag and drop vehicle GPS report here</p>
+                    <p className="text-2xs text-slate-400 mt-1">Supports XLS, XLSX formatted telemetry files</p>
+                  </div>
+                  <button onClick={() => setStep(1)} className="btn btn-secondary w-full py-2.5 text-xs">
+                    Back to Step 1: Upload Summary
                   </button>
-                )}
-              </div>
+                </div>
+              ) : (
+                <div className="space-y-6 animate-slide-down">
+                  {/* GPS Summary Dashboard */}
+                  <div className="flex justify-between items-center bg-slate-100 dark:bg-surface-50 p-4 rounded-xl border border-slate-200 dark:border-surface-300">
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900 dark:text-surface-950">GPS Telemetry Summary</h3>
+                      <p className="text-3xs text-slate-500">Successfully loaded {gpsFile?.name}</p>
+                    </div>
+                    <button onClick={resetGps} className="btn btn-secondary py-1.5 px-3 text-3xs font-semibold flex items-center gap-1">
+                      <RefreshCw className="h-3 w-3" /> Re-upload
+                    </button>
+                  </div>
+
+                  {/* GPS details grid */}
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                    <div className="card p-3.5 space-y-1">
+                      <span className="text-3xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1"><Landmark className="h-3 w-3" /> Detected Registration</span>
+                      <p className="text-xs font-black font-mono text-brand-600 dark:text-brand-400">{gpsSummary.detectedCanonicalRegistration}</p>
+                      <p className="text-4xs text-slate-400">Raw registration: {gpsSummary.rawRegistration}</p>
+                    </div>
+                    <div className="card p-3.5 space-y-1">
+                      <span className="text-3xs font-semibold text-slate-400 uppercase tracking-wider">Vehicle Specs</span>
+                      <p className="text-xs font-bold text-slate-950">{gpsSummary.make} - {gpsSummary.model}</p>
+                    </div>
+                    <div className="card p-3.5 space-y-1 col-span-2 md:col-span-1">
+                      <span className="text-3xs font-semibold text-slate-400 uppercase tracking-wider">Date/Time Range</span>
+                      <p className="text-3xs font-bold text-slate-900">{gpsSummary.dateRange}</p>
+                    </div>
+
+                    <div className="card p-3.5 space-y-1">
+                      <span className="text-3xs font-semibold text-slate-400 uppercase tracking-wider">GPS Record Count</span>
+                      <p className="text-xs font-bold text-slate-950">{gpsSummary.gpsRecordCount} logs</p>
+                    </div>
+                    <div className="card p-3.5 space-y-1">
+                      <span className="text-3xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1"><MapPin className="h-3 w-3" /> Fuel level range</span>
+                      <p className="text-xs font-bold text-slate-950">{gpsSummary.fuelLevelMin ?? 0}% to {gpsSummary.fuelLevelMax ?? 0}%</p>
+                    </div>
+                    <div className="card p-3.5 space-y-1">
+                      <span className="text-3xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-1"><Gauge className="h-3 w-3" /> Odometer range</span>
+                      <p className="text-xs font-bold text-slate-950">{gpsSummary.odometerMin ?? 0} to {gpsSummary.odometerMax ?? 0} km</p>
+                    </div>
+                  </div>
+
+                  {/* Evidence checks */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className={`card p-4 flex items-center justify-between border-l-4 ${
+                      gpsSummary.locationEvidenceAvailable ? 'border-l-green-600 bg-green-500/5' : 'border-l-red-600 bg-red-500/5'
+                    }`}>
+                      <span className="text-2xs font-bold text-slate-800">Location Evidence</span>
+                      {gpsSummary.locationEvidenceAvailable ? (
+                        <span className="badge bg-green-500/10 text-green-700 text-3xs font-bold py-1 px-2.5 rounded-full flex items-center gap-1"><CheckCircle2 className="h-3 w-3" /> Available</span>
+                      ) : (
+                        <span className="badge bg-red-500/10 text-red-700 text-3xs font-bold py-1 px-2.5 rounded-full flex items-center gap-1"><XCircle className="h-3 w-3" /> Missing</span>
+                      )}
+                    </div>
+                    <div className={`card p-4 flex items-center justify-between border-l-4 ${
+                      gpsSummary.engineEvidenceAvailable ? 'border-l-green-600 bg-green-500/5' : 'border-l-red-600 bg-red-500/5'
+                    }`}>
+                      <span className="text-2xs font-bold text-slate-800">Engine/Ignition Evidence</span>
+                      {gpsSummary.engineEvidenceAvailable ? (
+                        <span className="badge bg-green-500/10 text-green-700 text-3xs font-bold py-1 px-2.5 rounded-full flex items-center gap-1"><CheckCircle2 className="h-3 w-3" /> Available</span>
+                      ) : (
+                        <span className="badge bg-red-500/10 text-red-700 text-3xs font-bold py-1 px-2.5 rounded-full flex items-center gap-1"><XCircle className="h-3 w-3" /> Missing</span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Registry validation check */}
+                  {!gpsSummary.inRegistry ? (
+                    <div className="flex gap-3 p-4 bg-red-500/10 border border-red-300 rounded-xl text-red-700 text-xs">
+                      <ShieldAlert className="h-6 w-6 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-extrabold text-sm uppercase tracking-tight">Blocked: Vehicle is not in the fleet registry</p>
+                        <p className="mt-1 font-medium">The registration found in the GPS file (<span className="font-mono font-bold">{gpsSummary.rawRegistration}</span>) is not recognized as a member of the allowed fleet list. Telematics verification is disabled for this vehicle.</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex gap-2.5 p-3.5 bg-green-500/10 border border-green-300 rounded-xl text-green-700 text-xs">
+                      <CheckCircle2 className="h-4.5 w-4.5 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-bold">Authorized Fleet Vehicle confirmed</p>
+                        <p className="mt-0.5">Vehicle registration matched canonical registration <span className="font-mono font-bold">{gpsSummary.detectedCanonicalRegistration}</span> in the fleet allowlist.</p>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex gap-2">
+                    <button onClick={() => setStep(1)} className="btn btn-secondary w-full py-3 text-xs">
+                      Back
+                    </button>
+                    <button
+                      onClick={() => {
+                        setSelectedVehicle(gpsSummary.detectedCanonicalRegistration);
+                        setStep(3);
+                      }}
+                      className="btn btn-primary w-full py-3 text-xs font-semibold flex items-center justify-center gap-1"
+                      disabled={!gpsSummary.inRegistry}
+                    >
+                      Continue to Step 3: Run Verification <ChevronRight className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
           {/* STEP 3: RUN CHECK */}
-          {step === 3 && dkvMeta && gpsMeta && (
-            <div className="card space-y-5">
-              <h3 className="text-sm font-bold text-slate-900 dark:text-surface-950">Confirm Verification Details</h3>
+          {step === 3 && uploadSummary && gpsSummary && (
+            <div className="card space-y-6">
+              <h3 className="text-base font-extrabold text-slate-900 dark:text-surface-950 tracking-tight border-b border-slate-200 dark:border-surface-300 pb-3">Confirm Check Ingestion Parameters</h3>
 
               <div className="space-y-3 text-xs border-b border-slate-200 dark:border-surface-300 pb-4">
                 <div className="flex justify-between">
-                  <span className="text-slate-400">DKV Source File:</span>
-                  <span className="font-mono text-slate-700 dark:text-surface-800">{dkvFile?.name}</span>
+                  <span className="text-slate-400">Transaction Source File:</span>
+                  <span className="font-mono font-bold text-slate-700 dark:text-surface-800">{dkvFile?.name}</span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-slate-400">GPS Source File:</span>
-                  <span className="font-mono text-slate-700 dark:text-surface-800">{gpsFile?.name}</span>
+                  <span className="text-slate-400">GPS Telematics Source File:</span>
+                  <span className="font-mono font-bold text-slate-700 dark:text-surface-800">{gpsFile?.name}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-400">Transactions Range:</span>
-                  <span className="text-slate-700 dark:text-surface-800">{dkvMeta.dateRange}</span>
+                  <span className="text-slate-750 font-bold">{uploadSummary.fileOverview.transactionDateRange}</span>
                 </div>
               </div>
 
-              {/* Vehicle selector */}
-              <div className="space-y-2">
-                <label className="text-2xs font-semibold text-slate-500 uppercase tracking-wider block">Target Vehicle Registration</label>
-                <select
-                  className="input text-xs"
-                  value={selectedVehicle}
-                  onChange={(e) => setSelectedVehicle(e.target.value)}
-                >
-                  <option value="">Select vehicle...</option>
-                  {dkvMeta.vehicles.map((v: string) => (
-                    <option key={v} value={v}>{v}</option>
-                  ))}
-                  {!dkvMeta.vehicles.includes(gpsMeta.vehicle) && gpsMeta.vehicle && (
-                    <option value={gpsMeta.vehicle}>{gpsMeta.vehicle} (From GPS File)</option>
-                  )}
-                </select>
-              </div>
+              {/* Vehicle specific exclusion metrics */}
+              {(() => {
+                const sameVehicleTxsCount = uploadSummary.fleetVehiclesFound.find((v: any) => v.registration === selectedVehicle)?.chargeCount || 0;
+                const otherVehicles = uploadSummary.fleetVehiclesFound.filter((v: any) => v.registration !== selectedVehicle);
+                const otherTxsCount = otherVehicles.reduce((sum: number, v: any) => sum + v.chargeCount, 0);
 
-              {/* Warning if mismatched */}
-              {selectedVehicle && dkvMeta.vehicles.length > 0 && !dkvMeta.vehicles.some((v: string) => v.toUpperCase().replace(/\s+/g, '') === selectedVehicle.toUpperCase().replace(/\s+/g, '')) && (
-                <div className="flex gap-2.5 p-3.5 bg-amber-500/10 border border-amber-300 rounded-xl text-amber-700 text-xs">
-                  <AlertTriangle className="h-4.5 w-4.5 shrink-0 mt-0.5" />
-                  <div>
-                    <p className="font-bold">Mismatched Vehicle Warning</p>
-                    <p className="mt-0.5">The selected vehicle does not match the registrations parsed from the DKV file. Verify registrations before execution.</p>
+                return (
+                  <div className="space-y-4">
+                    <div className="p-4 bg-brand-500/5 rounded-xl border border-brand-200 space-y-1.5 text-xs text-brand-850">
+                      <p className="font-bold flex items-center gap-1"><Landmark className="h-4 w-4" /> Selected Vehicle comparison</p>
+                      <p className="text-slate-500">The verification engine will check only transactions linked to <span className="font-mono font-bold text-brand-700">{selectedVehicle}</span>.</p>
+                      <div className="pt-2 flex justify-between text-3xs font-mono">
+                        <span>Transactions for {selectedVehicle}:</span>
+                        <span className="font-bold">{sameVehicleTxsCount} transactions</span>
+                      </div>
+                      <div className="flex justify-between text-3xs font-mono">
+                        <span>Excluded other vehicle charges:</span>
+                        <span className="font-bold text-slate-500">{otherTxsCount} transactions ({otherVehicles.length} vehicles)</span>
+                      </div>
+                    </div>
+
+                    {otherVehicles.length > 0 && (
+                      <div className="text-3xs text-slate-400 italic">
+                        * Note: Charges for other fleet vehicles ({otherVehicles.map((v: any) => v.registration).join(', ')}) are excluded from the current comparison. To verify those charges, please return to Step 2 and upload the matching GPS telemetry file.
+                      </div>
+                    )}
                   </div>
-                </div>
-              )}
+                );
+              })()}
 
-              <div className="flex gap-2 pt-2">
-                <button onClick={() => setStep(2)} className="btn btn-secondary w-full py-2.5 text-xs" disabled={submitting}>
+              <div className="flex gap-2">
+                <button onClick={() => setStep(2)} className="btn btn-secondary w-full py-3 text-xs" disabled={submitting}>
                   Back
                 </button>
                 <button
                   onClick={handleRunCheck}
-                  className="btn btn-primary w-full py-2.5 text-xs font-semibold flex items-center justify-center gap-1.5"
+                  className="btn btn-primary w-full py-3 text-xs font-semibold flex items-center justify-center gap-1.5"
                   disabled={!selectedVehicle || submitting}
                 >
                   {submitting ? (
                     <>
-                      <Loader2 className="h-4 w-4 animate-spin" /> Verifying...
+                      <Loader2 className="h-4.5 w-4.5 animate-spin" /> Verifying...
                     </>
                   ) : (
                     <>
-                      Check Transactions <ArrowRight className="h-4 w-4" />
+                      Verify Telematics <ArrowRight className="h-4.5 w-4.5" />
                     </>
                   )}
                 </button>

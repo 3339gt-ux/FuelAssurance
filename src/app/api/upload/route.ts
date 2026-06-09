@@ -9,6 +9,7 @@ import { parseDKVInvoice } from '@/domain/parsers/dkv/dkv-invoice-parser';
 import { parseGPSFile } from '@/domain/parsers/gps/gps-parser';
 import { parseStationWorkbook } from '@/domain/parsers/stations/station-parser';
 import { parseAS24PDF } from '@/domain/parsers/as24/as24-pdf-parser';
+import { generateUploadSummary, generateGpsSummary } from '@/lib/upload-summary';
 
 export async function POST(req: NextRequest) {
   try {
@@ -48,6 +49,8 @@ export async function POST(req: NextRequest) {
     let documentType = 'UNKNOWN';
     let parserVersion = '1.0.0';
     let warnings: string[] = [];
+    let uploadSummary: any = null;
+    let gpsSummary: any = null;
 
     const fileLower = fileName.toLowerCase();
     const isPDF = mimeType === 'application/pdf' || fileLower.endsWith('.pdf');
@@ -80,6 +83,17 @@ export async function POST(req: NextRequest) {
 
       // Save canonical invoice transactions
       db.insertMany('invoice_transactions', result.invoiceRows);
+
+      uploadSummary = await generateUploadSummary(
+        buffer,
+        mimeType || 'application/pdf',
+        fileName,
+        'AS24',
+        'INVOICE',
+        pageCount,
+        warnings,
+        result.invoiceRows
+      );
 
       // Run AS24 Control-Total Audit
       if (result.statement) {
@@ -165,6 +179,17 @@ export async function POST(req: NextRequest) {
         // Save canonical transactions
         db.insertMany('transactions', result.transactions);
 
+        uploadSummary = await generateUploadSummary(
+          buffer,
+          mimeType || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          fileName,
+          'DKV',
+          'TRANSACTION',
+          workbook.SheetNames.length,
+          warnings,
+          result.transactions
+        );
+
       } else if (specifiedType === 'DKV Invoice' || fileLower.includes('invoice') || fileLower.includes('transactions_report')) {
         provider = 'DKV';
         documentType = 'INVOICE';
@@ -191,6 +216,17 @@ export async function POST(req: NextRequest) {
         // Save canonical invoice transactions
         db.insertMany('invoice_transactions', result.invoiceRows);
 
+        uploadSummary = await generateUploadSummary(
+          buffer,
+          mimeType || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          fileName,
+          'DKV',
+          'INVOICE',
+          workbook.SheetNames.length,
+          warnings,
+          result.invoiceRows
+        );
+
       } else if (specifiedType === 'GPS / Telematics' || fileLower.includes('gps') || fileLower.includes('telematics')) {
         provider = 'GPS';
         documentType = 'GPS';
@@ -216,6 +252,8 @@ export async function POST(req: NextRequest) {
 
         // Save telematics points
         db.insertMany('telematics_points', result.points);
+
+        gpsSummary = generateGpsSummary(result);
 
       } else if (specifiedType === 'Station Workbook' || fileLower.includes('station') || fileLower.includes('yard') || fileLower.includes('price')) {
         provider = 'STATION';
@@ -296,6 +334,8 @@ export async function POST(req: NextRequest) {
       control_total_status: controlTotalStatus,
       metadata: {
         warnings,
+        uploadSummary,
+        gpsSummary,
         ...((db.find('import_files', (f: any) => f.id === fileId) || {}).metadata || {}),
       },
     });
@@ -307,6 +347,8 @@ export async function POST(req: NextRequest) {
       message: 'Upload and parsing complete',
       fileId,
       importFile,
+      uploadSummary,
+      gpsSummary,
       pipelineResult: pipelineResult ? {
         runId: pipelineResult.run.id,
         matchedCount: pipelineResult.run.matched_count,
