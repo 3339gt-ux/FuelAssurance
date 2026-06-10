@@ -39,6 +39,13 @@ next-env.d.ts
 
 # Local persistence — NEVER commit
 local_db.json
+*.sqlite
+*.sqlite3
+data/
+uploads/
+private-uploads/
+sample-files/private/
+screenshots/private/
 
 # Sample / real data files — NEVER commit
 Sample Files/
@@ -47,6 +54,11 @@ inspect_tmp/
 *.xls
 *.csv
 *.pdf
+
+# Committed synthetic test fixtures are allowed under tests/fixtures/
+!tests/fixtures/**/*.xlsx
+!tests/fixtures/**/*.xls
+!tests/fixtures/**/*.csv
 
 # IDE
 .vscode/

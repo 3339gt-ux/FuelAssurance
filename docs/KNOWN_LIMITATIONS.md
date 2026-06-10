@@ -2,6 +2,14 @@
 
 This document outlines the current limitations, technical constraints, and planned improvements for the Fuel Assurance system.
 
+## Simple Mode / three-source workflow (2026-06)
+
+* Source detection may require manual confirmation for ambiguous spreadsheets.
+* Transaction batches persist in `local_db.json` — not yet synced to Supabase in Simple Mode.
+* Compact/comfortable density toggle is not applied uniformly across all tables.
+* E2E browser tests require local Sample Files and are excluded from CI.
+* Stored source files live in `private-uploads/` on the local machine only.
+
 ---
 
 ## 1. GPS Proximity Checks & Text-Based Location Data
