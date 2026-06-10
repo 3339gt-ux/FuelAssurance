@@ -1,15 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
-import path from 'path';
 import * as XLSX from 'xlsx';
 import { parseDKVInvoice } from '@/domain/parsers/dkv/dkv-invoice-parser';
+import { resolveFixtureOrSample } from '../../helpers/fixtures';
 
 describe('DKV Invoice Parser', () => {
-  const samplePath = path.resolve(__dirname, '../../../Sample Files/Invoice-Transactions_Report_2026-06-08 (2).xlsx');
-  const syntheticPath = path.resolve(__dirname, '../../fixtures/synthetic-dkv-invoice-period.xlsx');
-
   it('should parse DKV Invoice successfully', () => {
-    const filePath = fs.existsSync(samplePath) ? samplePath : syntheticPath;
+    const filePath = resolveFixtureOrSample('synthetic-dkv-invoice-period.xlsx', 'Invoice-Transactions_Report_2026-06-08 (2).xlsx');
     expect(fs.existsSync(filePath)).toBe(true);
 
     const workbook = XLSX.readFile(filePath);

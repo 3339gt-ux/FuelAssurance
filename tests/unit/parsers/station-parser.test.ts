@@ -1,16 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
-import path from 'path';
 import * as XLSX from 'xlsx';
 import { parseStationWorkbook } from '@/domain/parsers/stations/station-parser';
+import { resolveFixtureOrSample } from '../../helpers/fixtures';
 
 describe('Station Master Workbook Parser', () => {
-  const samplePath = path.resolve(__dirname, '../../../Sample Files/DKV _AS24 List (4).xlsx');
-
   it('should parse DKV / AS24 station list successfully', () => {
-    expect(fs.existsSync(samplePath)).toBe(true);
+    const filePath = resolveFixtureOrSample('synthetic-station-workbook.xlsx', 'DKV _AS24 List (4).xlsx');
+    expect(fs.existsSync(filePath)).toBe(true);
 
-    const workbook = XLSX.readFile(samplePath);
+    const workbook = XLSX.readFile(filePath);
     const sheetData = new Map<string, unknown[][]>();
 
     for (const name of workbook.SheetNames) {

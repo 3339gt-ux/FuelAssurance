@@ -31,6 +31,17 @@ Legacy parser tests may also read `Sample Files/` when present locally (gitignor
 
 On push/PR: install, type-check, lint, vitest, build.
 
+CI uses committed synthetic fixtures only. These suites are excluded from default `npm run test`:
+
+- `tests/seed.test.ts` — seeds `local_db.json` from real Sample Files
+- `tests/acceptance/domain.test.ts` — full integration against real Sample Files
+
+Run locally with Sample Files present:
+
+```powershell
+npm run test:local
+```
+
 ## Acceptance evidence
 
 Browser acceptance must use the real UI on port 3993 — not seeded DB rows alone.

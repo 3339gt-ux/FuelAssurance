@@ -1,12 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
-import path from 'path';
 import pdf from 'pdf-parse';
 import { parseAS24PDF, splitRegAndOdo } from '@/domain/parsers/as24/as24-pdf-parser';
 import { ProductType } from '@/domain/types';
+import { hasLocalSampleFiles, samplePath } from '../../helpers/fixtures';
 
 describe('AS24 PDF Parser', () => {
-  const pdfPath = path.resolve(__dirname, '../../../Sample Files/document_direct.pdf');
+  const pdfPath = samplePath('document_direct.pdf');
+  const hasSamplePdf = hasLocalSampleFiles();
 
   it('should split registration and odometer correctly', () => {
     // 241 MH registrations (3 digits)
@@ -48,7 +49,7 @@ describe('AS24 PDF Parser', () => {
     });
   });
 
-  it('should parse the sample AS24 PDF successfully', async () => {
+  it.skipIf(!hasSamplePdf)('should parse the sample AS24 PDF successfully', async () => {
     expect(fs.existsSync(pdfPath)).toBe(true);
     
     const buffer = fs.readFileSync(pdfPath);

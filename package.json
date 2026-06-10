@@ -12,6 +12,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:acceptance": "vitest run tests/acceptance",
+    "test:local": "vitest run tests/seed.test.ts tests/acceptance/domain.test.ts",
     "test:e2e": "playwright test",
     "type-check": "tsc --noEmit"
   },

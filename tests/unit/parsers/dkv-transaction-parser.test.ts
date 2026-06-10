@@ -1,17 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
-import path from 'path';
 import * as XLSX from 'xlsx';
 import { parseDKVTransactions } from '@/domain/parsers/dkv/dkv-transaction-parser';
 import { ProductType } from '@/domain/types';
+import { fixturePath, resolveFixtureOrSample } from '../../helpers/fixtures';
 
 describe('DKV Transaction Parser', () => {
-  const sample1Path = path.resolve(__dirname, '../../../Sample Files/Ola_Report_2026-06-08 (1).xlsx');
-  const sample2Path = path.resolve(__dirname, '../../../Sample Files/Ola_Report_2026-06-08 (2).xlsx');
-  const syntheticPath = path.resolve(__dirname, '../../fixtures/synthetic-dkv-daily.xlsx');
+  const syntheticV1 = fixturePath('synthetic-dkv-daily.xlsx');
+  const syntheticV2 = fixturePath('synthetic-dkv-daily-v2.xlsx');
 
   it('should parse DKV Transaction Variant 1 (12 columns) successfully', () => {
-    const filePath = fs.existsSync(sample1Path) ? sample1Path : syntheticPath;
+    const filePath = resolveFixtureOrSample('synthetic-dkv-daily.xlsx', 'Ola_Report_2026-06-08 (1).xlsx');
     expect(fs.existsSync(filePath)).toBe(true);
 
     const workbook = XLSX.readFile(filePath);
@@ -41,9 +40,10 @@ describe('DKV Transaction Parser', () => {
   });
 
   it('should parse DKV Transaction Variant 2 (21 columns) successfully', () => {
-    expect(fs.existsSync(sample2Path)).toBe(true);
+    const filePath = resolveFixtureOrSample('synthetic-dkv-daily-v2.xlsx', 'Ola_Report_2026-06-08 (2).xlsx');
+    expect(fs.existsSync(filePath)).toBe(true);
 
-    const workbook = XLSX.readFile(sample2Path);
+    const workbook = XLSX.readFile(filePath);
     const sheetName = workbook.SheetNames[0];
     expect(sheetName).toBeDefined();
 
