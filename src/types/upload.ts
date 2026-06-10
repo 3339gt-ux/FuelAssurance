@@ -3,12 +3,22 @@
  * Used by both the API route and the client pages so they cannot drift.
  */
 
+import type { TransactionSourceType } from '@/types/transaction-batch';
+
 export type UploadFileType =
   | 'AS24 Invoice (PDF)'
   | 'DKV Transactions'
   | 'DKV Invoice'
   | 'GPS / Telematics'
   | 'Station Workbook';
+
+export type { TransactionSourceType };
+
+export interface SourceDetectionInfo {
+  candidates: Array<{ sourceType: TransactionSourceType; confidence: number; reason: string }>;
+  detected: { sourceType: TransactionSourceType; confidence: number; reason: string } | null;
+  needsConfirmation: boolean;
+}
 
 /** Structured error returned when a stage fails. */
 export interface UploadError {
@@ -17,6 +27,7 @@ export interface UploadError {
   code: string;
   message: string;
   suggestedAction: string;
+  detection?: SourceDetectionInfo;
   /** Only present in development */
   technicalDetails?: string;
 }
@@ -29,6 +40,8 @@ export interface UploadSuccess {
   alreadyImported: boolean;
   provider: string;
   documentType: string;
+  sourceType?: TransactionSourceType;
+  batchId?: string;
   uploadSummary?: UploadSummaryShape | null;
   gpsSummary?: GpsSummaryShape | null;
   summaryWarning?: string;

@@ -23,8 +23,9 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     }
 
     const attachedGpsFiles = [...(batch.attachedGpsFiles || [])];
-    const vehicleStatuses = { ...(batch.vehicleStatuses || {}) };
-    const checkResults = { ...(batch.checkResults || {}) };
+    const vehicleStatuses = { ...(batch.vehicleStatuses || batch.vehicleCheckStatuses || {}) };
+    const checkResults = { ...(batch.checkResults || batch.verificationResults || {}) };
+    const batchVehicles = batch.vehicles || batch.vehiclesFound || [];
 
     let processedCount = 0;
     const errors: string[] = [];
@@ -65,7 +66,7 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       }
 
       // Check if this vehicle is found in the batch
-      const isVehicleInBatch = batch.vehicles.some(
+      const isVehicleInBatch = batchVehicles.some(
         (v: string) => normalizeRegistration(v) === normalizeRegistration(cleanGpsReg)
       );
 
@@ -291,7 +292,14 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
     db.update('transaction_batches', batchId, {
       attachedGpsFiles,
       vehicleStatuses,
+      vehicleCheckStatuses: vehicleStatuses,
       checkResults,
+      verificationResults: checkResults,
+      processingStatus: Object.values(vehicleStatuses).every((s) => s === 'Check completed')
+        ? 'checks_complete'
+        : attachedGpsFiles.length > 0
+          ? 'gps_partial'
+          : 'parsed',
     });
 
     return NextResponse.json({

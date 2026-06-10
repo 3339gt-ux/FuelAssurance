@@ -6,7 +6,13 @@ import {
   ShieldAlert, Loader2, RefreshCw, XCircle, Info, Landmark, MapPin, Gauge, RotateCcw,
 } from 'lucide-react';
 import { useDropzone } from 'react-dropzone';
-import type { UploadResponse, UploadSummaryShape, GpsSummaryShape } from '@/types/upload';
+import type {
+  UploadResponse,
+  UploadSummaryShape,
+  GpsSummaryShape,
+  SourceDetectionInfo,
+  TransactionSourceType,
+} from '@/types/upload';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Inline error panel — replaces all alert() calls
@@ -72,6 +78,9 @@ export default function DKVCheckPage() {
   const [dkvFile, setDkvFile] = useState<File | null>(null);
   const [uploadSummary, setUploadSummary] = useState<(UploadSummaryShape & { fileId: string }) | null>(null);
   const [dkvError, setDkvError] = useState<UploadErrorPanelProps | null>(null);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [detectionInfo, setDetectionInfo] = useState<SourceDetectionInfo | null>(null);
+  const [detectedSourceType, setDetectedSourceType] = useState<TransactionSourceType | null>(null);
 
   // Step 2: GPS File
   const [gpsFile, setGpsFile] = useState<File | null>(null);
@@ -83,24 +92,57 @@ export default function DKVCheckPage() {
   const [checkError, setCheckError] = useState<UploadErrorPanelProps | null>(null);
 
   // ── Helpers ────────────────────────────────────────────────────────────────
-  const resetDkv = () => { setDkvFile(null); setUploadSummary(null); setDkvError(null); };
+  const resetDkv = () => {
+    setDkvFile(null);
+    setUploadSummary(null);
+    setDkvError(null);
+    setPendingFile(null);
+    setDetectionInfo(null);
+    setDetectedSourceType(null);
+  };
   const resetGps = () => { setGpsFile(null); setGpsSummary(null); setGpsError(null); };
 
-  const processDkvUpload = useCallback(async (file: File) => {
-    setDkvFile(file);
-    setDkvError(null);
-    setIsProcessing(true);
-
+  const uploadDkvWithType = useCallback(async (file: File, confirmedType?: TransactionSourceType) => {
     const formData = new FormData();
     formData.append('file', file);
-    formData.append('type', file.name.toLowerCase().includes('invoice') ? 'DKV Invoice' : 'DKV Transactions');
+    if (confirmedType) {
+      formData.append('confirmedType', confirmedType);
+    }
+
+    const res = await fetch('/api/upload', { method: 'POST', body: formData });
+    return res.json() as Promise<UploadResponse>;
+  }, []);
+
+  const processDkvUpload = useCallback(async (file: File, confirmedType?: TransactionSourceType) => {
+    setDkvFile(file);
+    setDkvError(null);
+    setDetectionInfo(null);
+    setIsProcessing(true);
 
     try {
-      const res = await fetch('/api/upload', { method: 'POST', body: formData });
-      const data: UploadResponse = await res.json();
+      const data = await uploadDkvWithType(file, confirmedType);
+
+      if ('success' in data && !data.success && data.code === 'CONFIRMATION_REQUIRED' && data.detection) {
+        if (process.env.NEXT_PUBLIC_E2E_HOOKS === 'true' && data.detection.detected) {
+          const retry = await uploadDkvWithType(file, data.detection.detected.sourceType);
+          if ('success' in retry && retry.success && retry.uploadSummary) {
+            setDkvFile(file);
+            setUploadSummary({ fileId: retry.fileId, ...retry.uploadSummary });
+            setDetectedSourceType(retry.sourceType ?? null);
+            setPendingFile(null);
+            return;
+          }
+        }
+        setPendingFile(file);
+        setDetectionInfo(data.detection);
+        setDkvFile(null);
+        return;
+      }
 
       if ('success' in data && data.success && data.uploadSummary) {
         setUploadSummary({ fileId: data.fileId, ...data.uploadSummary });
+        setDetectedSourceType(data.sourceType ?? null);
+        setPendingFile(null);
       } else if ('success' in data && data.success && !data.uploadSummary) {
         setDkvError({
           fileName: file.name,
@@ -135,7 +177,12 @@ export default function DKVCheckPage() {
     } finally {
       setIsProcessing(false);
     }
-  }, [resetDkv]);
+  }, [uploadDkvWithType, resetDkv]);
+
+  const confirmSourceType = useCallback(async (sourceType: TransactionSourceType) => {
+    if (!pendingFile) return;
+    await processDkvUpload(pendingFile, sourceType);
+  }, [pendingFile, processDkvUpload]);
 
   // ── Dropzone: DKV File ─────────────────────────────────────────────────────
   const { getRootProps: getDkvProps, getInputProps: getDkvInput, isDragActive: dkvActive } = useDropzone({
@@ -306,7 +353,35 @@ export default function DKVCheckPage() {
             <div className="space-y-6">
               {dkvError && <UploadErrorPanel {...dkvError} />}
 
-              {!uploadSummary && !dkvError ? (
+              {detectionInfo && pendingFile && !uploadSummary ? (
+                <div className="card space-y-4 border-amber-200 bg-amber-500/5 animate-slide-down">
+                  <div className="flex items-start gap-3">
+                    <Info className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="text-sm font-bold text-amber-900">Confirm source type</p>
+                      <p className="text-xs text-amber-800 mt-1">
+                        Structure detection for <span className="font-mono">{pendingFile.name}</span> needs your confirmation before parsing.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    {detectionInfo.candidates.map((c) => (
+                      <button
+                        key={c.sourceType}
+                        onClick={() => void confirmSourceType(c.sourceType)}
+                        className="w-full text-left card p-3 hover:border-brand-400 hover:bg-brand-500/5 transition border border-slate-200"
+                      >
+                        <div className="flex justify-between items-center">
+                          <span className="text-xs font-bold text-slate-800">{c.sourceType}</span>
+                          <span className="badge bg-brand-500/10 text-brand-700 text-3xs">{Math.round(c.confidence * 100)}%</span>
+                        </div>
+                        <p className="text-3xs text-slate-500 mt-1">{c.reason}</p>
+                      </button>
+                    ))}
+                  </div>
+                  <button onClick={resetDkv} className="btn btn-secondary w-full text-xs py-2">Cancel</button>
+                </div>
+              ) : !uploadSummary && !dkvError ? (
                 <div {...getDkvProps()} className={`card border-2 border-dashed flex flex-col items-center justify-center py-20 text-center cursor-pointer transition ${
                   dkvActive ? 'border-brand-500 bg-brand-500/5' : 'border-slate-350 dark:border-surface-300 hover:bg-slate-50 dark:hover:bg-surface-50'
                 }`}>
@@ -319,8 +394,8 @@ export default function DKVCheckPage() {
                     }}
                   />
                   <Upload className="h-10 w-10 text-slate-400 mb-3" />
-                  <p className="text-sm font-bold text-slate-800 dark:text-surface-950">Drag and drop DKV transaction report here</p>
-                  <p className="text-2xs text-slate-400 mt-1">Supports XLSX, XLS, and CSV files</p>
+                  <p className="text-sm font-bold text-slate-800 dark:text-surface-950">Drag and drop DKV report here</p>
+                  <p className="text-2xs text-slate-400 mt-1">Daily authorisation, weekly reports, or invoice-period transaction files (XLS, XLSX, CSV)</p>
                 </div>
               ) : uploadSummary ? (
                 <div className="space-y-6 animate-slide-down">
@@ -334,10 +409,18 @@ export default function DKVCheckPage() {
                     </button>
                   </div>
 
+                  {detectedSourceType && (
+                    <div className="flex items-center gap-2 p-3 rounded-xl bg-brand-500/5 border border-brand-200 text-xs">
+                      <CheckCircle2 className="h-4 w-4 text-brand-600" />
+                      <span>Detected source: <strong>{detectedSourceType}</strong> — saved as reusable transaction batch</span>
+                      <a href={`/batches`} className="ml-auto text-brand-700 font-semibold hover:underline">Open batch workspace →</a>
+                    </div>
+                  )}
+
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                     {[
                       { label: 'Provider', val: uploadSummary.fileOverview.provider },
-                      { label: 'Document Type', val: uploadSummary.fileOverview.documentType },
+                      { label: 'Document Type', val: detectedSourceType || uploadSummary.fileOverview.documentType },
                       { label: 'Sheets / Pages', val: uploadSummary.fileOverview.pageOrSheetCount },
                       { label: 'Total Rows', val: uploadSummary.fileOverview.totalTransactionRows },
                     ].map((item, idx) => (
