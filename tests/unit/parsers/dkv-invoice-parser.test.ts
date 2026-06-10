@@ -6,11 +6,13 @@ import { parseDKVInvoice } from '@/domain/parsers/dkv/dkv-invoice-parser';
 
 describe('DKV Invoice Parser', () => {
   const samplePath = path.resolve(__dirname, '../../../Sample Files/Invoice-Transactions_Report_2026-06-08 (2).xlsx');
+  const syntheticPath = path.resolve(__dirname, '../../fixtures/synthetic-dkv-invoice-period.xlsx');
 
   it('should parse DKV Invoice successfully', () => {
-    expect(fs.existsSync(samplePath)).toBe(true);
+    const filePath = fs.existsSync(samplePath) ? samplePath : syntheticPath;
+    expect(fs.existsSync(filePath)).toBe(true);
 
-    const workbook = XLSX.readFile(samplePath);
+    const workbook = XLSX.readFile(filePath);
     const sheetName = workbook.SheetNames[0];
     expect(sheetName).toBeDefined();
 
