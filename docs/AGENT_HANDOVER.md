@@ -2,7 +2,8 @@
 
 **Branch:** `grok/fuel-assurance-three-source-multi-gps`  
 **Remote:** `https://github.com/3339gt-ux/FuelAssurance.git`  
-**Port:** 3993
+**Port:** 3993 (bind `0.0.0.0` — localhost + LAN)  
+**LAN URL:** `http://<HOST-PC-IP>:3993` (private network only)
 
 ## What works
 
@@ -53,6 +54,16 @@ See `src/types/transaction-batch.ts` — includes `sourceType`, `storedFileRefer
 cd "C:\Fuel Assurance"
 git fetch origin
 git checkout grok/fuel-assurance-three-source-multi-gps
-npm install
+npm ci
 npm run dev
 ```
+
+LAN access from other PCs:
+
+```powershell
+.\scripts\start-lan.ps1 -Mode Development
+```
+
+Requires Windows Firewall rule **Fuel Assurance Port 3993** (TCP 3993, Private profile). See [LOCAL_DEVELOPMENT.md](LOCAL_DEVELOPMENT.md).
+
+Client IDs use `generateId()` in `src/lib/utils.ts` with HTTP-safe fallbacks — do not rely on `crypto.randomUUID()` alone in browser components.

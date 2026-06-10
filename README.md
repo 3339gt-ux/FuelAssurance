@@ -16,12 +16,46 @@ npm run dev
 
 Open [http://localhost:3993](http://localhost:3993).
 
+## LAN access (private network only)
+
+Fuel Assurance listens on **all local interfaces** at port **3993** so colleagues on the same trusted private network can open:
+
+`http://<HOST-PC-IP>:3993`
+
+Find the host IPv4 address in PowerShell:
+
+```powershell
+Get-NetIPAddress -AddressFamily IPv4 |
+  Where-Object { $_.IPAddress -notlike '127.*' -and $_.AddressState -eq 'Preferred' } |
+  Select-Object InterfaceAlias, IPAddress
+```
+
+Convenient startup script:
+
+```powershell
+.\scripts\start-lan.ps1 -Mode Development
+# or
+.\scripts\start-lan.ps1 -Mode Production
+```
+
+**Requirements**
+
+- Windows network profile must be **Private** (or domain-managed equivalent) — not Public.
+- A Windows Defender Firewall inbound rule named **Fuel Assurance Port 3993** must allow TCP **3993** on the **Private** profile only.
+- The host PC must stay powered on and awake.
+- Do **not** expose port 3993 to the public internet or router port-forwarding.
+
+LAN access uses ordinary HTTP. Browsers will show **Not secure** — this is expected on a private network. Traffic is not encrypted unless you deploy behind HTTPS separately.
+
+The LAN IP may change when DHCP renews unless the router has a DHCP reservation for the host PC.
+
 ## Scripts
 
 | Command | Purpose |
 |---------|---------|
-| `npm run dev` | Development server on port **3993** |
-| `npm run start` | Production server on port **3993** |
+| `npm run dev` | Development server on **0.0.0.0:3993** (localhost + LAN) |
+| `npm run start` | Production server on **0.0.0.0:3993** (localhost + LAN) |
+| `.\scripts\start-lan.ps1` | Safe LAN startup with URL summary |
 | `npm run build` | Production build |
 | `npm run type-check` | TypeScript validation |
 | `npm run lint` | ESLint |
