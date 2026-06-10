@@ -1,16 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
-import path from 'path';
 import * as XLSX from 'xlsx';
 import { parseGPSFile } from '@/domain/parsers/gps/gps-parser';
+import { resolveFixtureOrSample } from '../../helpers/fixtures';
 
 describe('GPS Telematics Parser', () => {
-  const samplePath = path.resolve(__dirname, '../../../Sample Files/GPS 1.xls');
-
   it('should parse GPS telematics file successfully', () => {
-    expect(fs.existsSync(samplePath)).toBe(true);
+    const filePath = resolveFixtureOrSample('synthetic-gps.xlsx', 'GPS 1.xls');
+    expect(fs.existsSync(filePath)).toBe(true);
 
-    const workbook = XLSX.readFile(samplePath);
+    const workbook = XLSX.readFile(filePath);
     const sheetName = workbook.SheetNames[0];
     expect(sheetName).toBeDefined();
 

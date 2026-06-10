@@ -12,6 +12,13 @@ import { parseAS24PDF } from '@/domain/parsers/as24/as24-pdf-parser';
 import { generateUploadSummary, generateGpsSummary } from '@/lib/upload-summary';
 import type { UploadResponse } from '@/types/upload';
 import { getCachedParse, setCachedParse, CURRENT_PARSER_VERSION } from '@/lib/parse-cache';
+import {
+  detectSourceType,
+  mapLegacyTypeToSourceType,
+  mapSourceTypeToProvider,
+} from '@/lib/source-detection';
+import { createTransactionBatch } from '@/lib/transaction-batch-service';
+import type { TransactionSourceType } from '@/types/transaction-batch';
 
 const IS_DEV = process.env.NODE_ENV !== 'production';
 
@@ -37,10 +44,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // ── Stage: file-read ────────────────────────────────────────────────────────
   let file: File;
   let specifiedType: string;
+  let confirmedType: string;
   try {
     const formData = await req.formData();
     file = formData.get('file') as File;
     specifiedType = (formData.get('type') as string) || '';
+    confirmedType = (formData.get('confirmedType') as string) || specifiedType;
     if (!file || !(file instanceof File)) {
       return stageError('file-read', 'NO_FILE', 'No file was attached to the request.', 'Ensure the file field is included in the form data.');
     }
@@ -61,29 +70,53 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const fileLower = fileName.toLowerCase();
   const isPDF = mimeType === 'application/pdf' || fileLower.endsWith('.pdf');
 
-  // ── Stage: type-detection ───────────────────────────────────────────────────
+  // ── Stage: type-detection (structure-based) ───────────────────────────────
+  const detection = await detectSourceType(buffer, fileName, mimeType, confirmedType || undefined);
+
+  if (!confirmedType && detection.needsConfirmation) {
+    return NextResponse.json({
+      success: false,
+      stage: 'type-detection',
+      code: 'CONFIRMATION_REQUIRED',
+      message: detection.detected
+        ? `Detected likely type: ${detection.detected.sourceType} (${Math.round(detection.detected.confidence * 100)}% confidence). Please confirm.`
+        : `Could not confidently determine the file type for "${fileName}".`,
+      suggestedAction: 'Review the detected possibilities and confirm the correct source type before import.',
+      detection: {
+        candidates: detection.candidates,
+        detected: detection.detected,
+        needsConfirmation: true,
+      },
+    }, { status: 422 });
+  }
+
+  let sourceType: TransactionSourceType | null =
+    mapLegacyTypeToSourceType(confirmedType) ??
+    (detection.detected?.sourceType ?? null);
+
+  if (!sourceType && specifiedType === 'Station Workbook') {
+    sourceType = null; // handled below
+  }
+
   let provider = 'UNKNOWN';
   let documentType = 'UNKNOWN';
 
-  if (isPDF || specifiedType === 'AS24 Invoice (PDF)') {
-    provider = 'AS24';
-    documentType = 'INVOICE';
-  } else if (specifiedType === 'GPS / Telematics' || fileLower.includes('gps') || fileLower.includes('telematics')) {
-    provider = 'GPS';
-    documentType = 'GPS';
-  } else if (specifiedType === 'DKV Transactions' || fileLower.includes('ola') || fileLower.includes('transaction')) {
-    provider = 'DKV';
-    documentType = 'TRANSACTION';
-  } else if (specifiedType === 'DKV Invoice' || fileLower.includes('invoice') || fileLower.includes('transactions_report')) {
-    provider = 'DKV';
-    documentType = 'INVOICE';
+  if (sourceType) {
+    const mapped = mapSourceTypeToProvider(sourceType);
+    provider = mapped.provider;
+    documentType = mapped.documentType;
   } else if (specifiedType === 'Station Workbook' || fileLower.includes('station') || fileLower.includes('yard') || fileLower.includes('price')) {
     provider = 'STATION';
     documentType = 'STATION';
   }
 
   if (provider === 'UNKNOWN') {
-    return stageError('type-detection', 'UNKNOWN_FILE_TYPE', `The file "${fileName}" could not be matched to a supported type.`, 'Use the type selector to specify the file type, or ensure the filename contains a recognisable keyword (gps, invoice, ola, station).');
+    return stageError(
+      'type-detection',
+      'UNKNOWN_FILE_TYPE',
+      `The file "${fileName}" could not be matched to a supported type.`,
+      'Confirm the source type (AS24 PDF, DKV daily, DKV invoice-period, or GPS) and try again.'
+    );
   }
 
   // ── Stage: duplicate-check ──────────────────────────────────────────────────
@@ -140,6 +173,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   let uploadSummary: any = null;
   let gpsSummary: any = null;
   let summaryWarning: string | undefined;
+  let as24Statement: { statementNumber?: string; statementDate?: string } | undefined;
 
   if (provider === 'AS24') {
     // ── AS24 PDF ──────────────────────────────────────────────────────────────
@@ -245,6 +279,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     } catch (err) {
       summaryWarning = `Upload summary generation failed (${String(err).slice(0, 120)}). Core import succeeded.`;
       console.warn('Summary generation error (non-fatal):', err);
+    }
+
+    if (parseResult.statement) {
+      as24Statement = {
+        statementNumber: parseResult.statement.statementNumber,
+        statementDate: parseResult.statement.statementDate,
+      };
     }
 
     // AS24 control-total audit
@@ -476,60 +517,32 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (provider === 'DKV' || provider === 'AS24') {
     try {
       const rows = provider === 'DKV'
-        ? (documentType === 'TRANSACTION' ? db.select('transactions', (t: any) => t.importFileId === fileId) : db.select('invoice_transactions', (t: any) => t.importFileId === fileId))
+        ? (documentType === 'TRANSACTION'
+          ? db.select('transactions', (t: any) => t.importFileId === fileId)
+          : db.select('invoice_transactions', (t: any) => t.importFileId === fileId))
         : db.select('invoice_transactions', (t: any) => t.importFileId === fileId);
 
-      const uniqueVehicles = Array.from(new Set(
-        rows.map((r: any) => {
-          const reg = r.registration || r.vehicleRegistration || '';
-          return reg.replace(/\s+/g, '').toUpperCase();
-        }).filter(Boolean)
-      ));
+      const batchSourceType: TransactionSourceType =
+        sourceType ??
+        (provider === 'AS24'
+          ? 'AS24 Invoice PDF'
+          : documentType === 'TRANSACTION'
+            ? 'DKV Daily Transactions'
+            : 'DKV Invoice-Period Transactions');
 
-      const dates = rows.map((r: any) => r.transactionDate).filter(Boolean).sort();
-      const earliest = dates[0] ?? '';
-      const latest = dates[dates.length - 1] ?? '';
-
-      let totalFuelVolume = 0;
-      const totalAmountExVatByCurrency: Record<string, number> = {};
-      for (const row of rows) {
-        const vol = parseFloat(row.volume || row.quantity || '0');
-        if (!isNaN(vol)) {
-          const pt = row.productType;
-          if (pt === 'DIESEL' || pt === 'ADBLUE' || pt === 'GNR' || pt === 'RED_DIESEL') totalFuelVolume += vol;
-        }
-        const curr = row.paymentCurrency || row.serviceCurrency || 'EUR';
-        const amt = parseFloat(row.paymentAmountExVat || row.baseValueNet || '0');
-        if (!isNaN(amt)) totalAmountExVatByCurrency[curr] = (totalAmountExVatByCurrency[curr] || 0) + amt;
-      }
-      for (const key of Object.keys(totalAmountExVatByCurrency)) {
-        totalAmountExVatByCurrency[key] = parseFloat(totalAmountExVatByCurrency[key]!.toFixed(2));
-      }
-
-      const vehicleStatuses: Record<string, string> = {};
-      for (const v of uniqueVehicles) vehicleStatuses[v] = 'GPS not attached';
-
-      db.insert('transaction_batches', {
-        id: fileId,
-        provider,
-        filename: fileName,
+      createTransactionBatch({
+        batchId: fileId,
+        sourceType: batchSourceType,
+        originalFileName: fileName,
         fileHash: hash,
-        uploadDate: new Date().toISOString(),
-        dateRange: { earliest, latest },
-        vehicles: uniqueVehicles,
-        attachedGpsFiles: [],
-        vehicleStatuses,
-        checkResults: {},
-        parsingWarnings: warnings,
-        parserVersion,
-        chargeSummary: {
-          totalChargesCount: rows.length,
-          totalFuelVolume: parseFloat(totalFuelVolume.toFixed(2)),
-          totalAmountExVatByCurrency,
-        },
+        buffer,
+        parserVersion: parserVersion || CURRENT_PARSER_VERSION,
+        warnings,
+        rows,
+        ...(as24Statement ? { statement: as24Statement } : {}),
+        uploadSummary,
       });
     } catch (err) {
-      // Non-fatal — batch creation failure should not block the import response
       console.warn('Batch creation failed (non-fatal):', err);
     }
   }
@@ -549,7 +562,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   });
 
   // ── Stage: response ─────────────────────────────────────────────────────────
-  return NextResponse.json({
+  const batchSourceType: TransactionSourceType | undefined =
+    sourceType ??
+    (provider === 'AS24'
+      ? 'AS24 Invoice PDF'
+      : provider === 'DKV'
+        ? documentType === 'TRANSACTION'
+          ? 'DKV Daily Transactions'
+          : 'DKV Invoice-Period Transactions'
+        : undefined);
+
+  const successBody: UploadResponse = {
     success: true,
     fileId,
     message: 'Upload and parsing complete',
@@ -559,7 +582,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     uploadSummary,
     gpsSummary,
     ...(summaryWarning ? { summaryWarning } : {}),
-    // Legacy fields for backward compatibility during transition
+    ...(batchSourceType ? { sourceType: batchSourceType } : {}),
+    ...(provider === 'DKV' || provider === 'AS24' ? { batchId: fileId } : {}),
     importFile,
-  } satisfies UploadResponse);
+  };
+
+  return NextResponse.json(successBody);
 }

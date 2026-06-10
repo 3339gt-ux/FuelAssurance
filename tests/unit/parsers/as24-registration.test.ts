@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import fs from 'fs';
-import path from 'path';
 import pdf from 'pdf-parse';
+import { hasLocalSampleFiles, samplePath } from '../../helpers/fixtures';
 import {
   parseCardsFillingRegistration,
   parsePassangoRegistration,
@@ -46,8 +46,8 @@ describe('AS24 section-aware registration extraction', () => {
     });
   });
 
-  it('extracts expected registrations from sample AS24 PDF', async () => {
-    const pdfPath = path.resolve(__dirname, '../../../Sample Files/document_direct.pdf');
+  it.skipIf(!hasLocalSampleFiles())('extracts expected registrations from sample AS24 PDF', async () => {
+    const pdfPath = samplePath('document_direct.pdf');
     expect(fs.existsSync(pdfPath)).toBe(true);
 
     const buffer = fs.readFileSync(pdfPath);
@@ -83,8 +83,8 @@ describe('AS24 section-aware registration extraction', () => {
     }
   });
 
-  it('section-aware text scan never emits forbidden concatenated registrations', async () => {
-    const pdfPath = path.resolve(__dirname, '../../../Sample Files/document_direct.pdf');
+  it.skipIf(!hasLocalSampleFiles())('section-aware text scan never emits forbidden concatenated registrations', async () => {
+    const pdfPath = samplePath('document_direct.pdf');
     const buffer = fs.readFileSync(pdfPath);
     const pdfData = await pdf(buffer);
     const extracted = extractAS24RegistrationsFromText(pdfData.text);

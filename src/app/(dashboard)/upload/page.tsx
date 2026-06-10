@@ -2,6 +2,7 @@
 
 import React, { useState, useCallback, useEffect } from 'react';
 import { Upload, FileSpreadsheet, FileText, AlertTriangle, CheckCircle2, X, Eye } from 'lucide-react';
+import { generateId } from '@/lib/utils';
 
 const FILE_TYPES = [
   { label: 'DKV Transactions', accept: '.xlsx,.xls', description: 'Ola_Report transaction file' },
@@ -84,7 +85,7 @@ export default function UploadPage() {
 
   const addFiles = (files: File[]) => {
     const newEntries: QueuedFile[] = files.map((f) => ({
-      id: crypto.randomUUID(),
+      id: generateId(),
       file: f,
       type: detectFileType(f.name),
       status: 'queued' as const,
