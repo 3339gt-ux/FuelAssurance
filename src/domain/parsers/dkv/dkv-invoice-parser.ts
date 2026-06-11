@@ -74,7 +74,8 @@ export interface DKVInvoiceParseResult {
  */
 export function parseDKVInvoice(
   rows: unknown[][],
-  fileId: string
+  fileId: string,
+  sheetName?: string
 ): DKVInvoiceParseResult {
   const warnings: string[] = [];
   const headerRowIndex = detectHeaderRow(rows);
@@ -188,6 +189,25 @@ export function parseDKVInvoice(
 
     const productType = detectProductType(raw.productCode, raw.product, raw.productGroup);
 
+    const sourceEvidence = {
+      sourceFileId: fileId,
+      sourceFileName: '',
+      sourceType: 'DKV_INVOICE_XLS' as const,
+      worksheetName: sheetName || 'Sheet1',
+      rowNumber: i + 1,
+      extractedFields: {
+        registration: raw.licencePlate,
+        cardBoxNo: raw.cardBoxNo,
+        transactionTime: raw.transactionTime,
+        stationName: raw.stationName,
+        product: raw.product,
+        quantity: raw.quantity,
+        valueOfPurchaseNet: raw.valueOfPurchaseNet,
+      },
+      confidence: 100,
+      parserVersion: '1.0.0',
+    };
+
     const canonical: CanonicalInvoiceRow = {
       id: generateId(),
       importFileId: fileId,
@@ -238,6 +258,7 @@ export function parseDKVInvoice(
       customerId: raw.customerId,
       cardNumberPartner: raw.cardBoxNoPartner,
       provider: CardProvider.DKV,
+      sourceEvidence,
     };
 
     invoiceRows.push(canonical);

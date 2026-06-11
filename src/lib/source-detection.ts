@@ -106,6 +106,16 @@ async function detectPdfSource(buffer: Buffer): Promise<SourceDetectionCandidate
   try {
     const data = await pdf(buffer);
     const text = (data.text || '').toLowerCase();
+    
+    // Specific check for DKV Invoice PDF
+    if (text.includes('e-summary') && (text.includes('dkv euro service') || text.includes('dkv mobility'))) {
+      return [{
+        sourceType: 'DKV Invoice PDF',
+        confidence: 0.98,
+        reason: 'PDF contains DKV E-SUMMARY statement page and company identification.',
+      }];
+    }
+
     const hits = AS24_PDF_MARKERS.filter((m) => text.includes(m)).length;
     if (hits >= 2) {
       return [{
@@ -137,6 +147,8 @@ export function mapSourceTypeToProvider(
       return { provider: 'DKV', documentType: 'TRANSACTION' };
     case 'DKV Invoice-Period Transactions':
       return { provider: 'DKV', documentType: 'INVOICE' };
+    case 'DKV Invoice PDF':
+      return { provider: 'DKV', documentType: 'INVOICE' };
     case 'GPS / Telematics':
       return { provider: 'GPS', documentType: 'GPS' };
     default:
@@ -149,6 +161,7 @@ export function mapLegacyTypeToSourceType(type: string): TransactionSourceType |
     'AS24 Invoice (PDF)': 'AS24 Invoice PDF',
     'DKV Transactions': 'DKV Daily Transactions',
     'DKV Invoice': 'DKV Invoice-Period Transactions',
+    'DKV Invoice (PDF)': 'DKV Invoice PDF',
     'GPS / Telematics': 'GPS / Telematics',
   };
   return map[type] ?? null;

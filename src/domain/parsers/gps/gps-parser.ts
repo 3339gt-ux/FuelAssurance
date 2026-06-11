@@ -51,7 +51,8 @@ export interface GPSParseResult {
  */
 export function parseGPSFile(
   rows: unknown[][],
-  fileId: string
+  fileId: string,
+  sheetName?: string
 ): GPSParseResult {
   const warnings: string[] = [];
   const headerRowIndex = detectHeaderRow(rows);
@@ -125,6 +126,24 @@ export function parseGPSFile(
     const km = raw.km ? parseFloat(raw.km) : null;
     const speed = raw.speed ? parseFloat(raw.speed) : null;
 
+    const sourceEvidence = {
+      sourceFileId: fileId,
+      sourceFileName: '',
+      sourceType: 'GPS_XLS' as const,
+      worksheetName: sheetName || 'Sheet1',
+      rowNumber: i + 1,
+      extractedFields: {
+        vehicle: raw.vehicle,
+        createdDate: raw.createdDate,
+        fuelLevel: raw.fuelLevel,
+        km: raw.km,
+        speed: raw.speed,
+        activity: raw.activity,
+      },
+      confidence: 100,
+      parserVersion: '1.0.0',
+    };
+
     const point: CanonicalTelematicsPoint = {
       id: generateId(),
       importFileId: fileId,
@@ -148,6 +167,7 @@ export function parseGPSFile(
       // NO fabricated coordinates
       latitude: null,
       longitude: null,
+      sourceEvidence,
     };
 
     points.push(point);

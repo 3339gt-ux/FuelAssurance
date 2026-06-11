@@ -6,6 +6,7 @@ export type TransactionSourceType =
   | 'AS24 Invoice PDF'
   | 'DKV Daily Transactions'
   | 'DKV Invoice-Period Transactions'
+  | 'DKV Invoice PDF'
   | 'GPS / Telematics';
 
 export type BatchProcessingStatus =

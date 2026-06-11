@@ -9,6 +9,7 @@ import { parseDKVInvoice } from '@/domain/parsers/dkv/dkv-invoice-parser';
 import { parseGPSFile } from '@/domain/parsers/gps/gps-parser';
 import { parseStationWorkbook } from '@/domain/parsers/stations/station-parser';
 import { parseAS24PDF } from '@/domain/parsers/as24/as24-pdf-parser';
+import { parseDKVInvoicePDF } from '@/domain/parsers/dkv/dkv-invoice-pdf-parser';
 import { generateUploadSummary, generateGpsSummary } from '@/lib/upload-summary';
 import type { UploadResponse } from '@/types/upload';
 import { getCachedParse, setCachedParse, CURRENT_PARSER_VERSION } from '@/lib/parse-cache';
@@ -175,8 +176,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   let summaryWarning: string | undefined;
   let as24Statement: { statementNumber?: string; statementDate?: string } | undefined;
 
-  if (provider === 'AS24') {
-    // ── AS24 PDF ──────────────────────────────────────────────────────────────
+  if (isPDF) {
+    // ── PDF Invoice Parsing ───────────────────────────────────────────────────
     const pagesData: any[] = [];
     let pdfData: any;
 
@@ -212,9 +213,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     } catch (err) {
       return stageError(
         'core-parse',
-        'AS24_PDF_READ_FAILED',
+        'PDF_READ_FAILED',
         `The file "${fileName}" could not be read as a PDF.`,
-        'Ensure the file is a valid AS24 PDF invoice, not a scanned image or password-protected file.',
+        'Ensure the file is a valid PDF invoice, not a scanned image or password-protected file.',
         err
       );
     }
@@ -223,25 +224,53 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     pagesData.sort((a, b) => a.pageNum - b.pageNum);
 
     let parseResult: any;
-    try {
-      parseResult = parseAS24PDF(pdfData.text, fileId, pagesData);
-    } catch (err) {
+    if (provider === 'AS24') {
+      try {
+        parseResult = parseAS24PDF(pdfData.text, fileId, pagesData);
+      } catch (err) {
+        return stageError(
+          'core-parse',
+          'AS24_PARSE_FAILED',
+          `The AS24 PDF parser failed on "${fileName}".`,
+          'Check that the file is an AS24 invoice in a supported format (Cards Filling List or PASSango sections expected).',
+          err
+        );
+      }
+    } else if (provider === 'DKV') {
+      try {
+        parseResult = parseDKVInvoicePDF(pdfData.text, fileId, pagesData);
+      } catch (err) {
+        return stageError(
+          'core-parse',
+          'DKV_PDF_PARSE_FAILED',
+          `The DKV PDF parser failed on "${fileName}".`,
+          'Check that the file is a DKV PDF invoice in a supported format.',
+          err
+        );
+      }
+    } else {
       return stageError(
-        'core-parse',
-        'AS24_PARSE_FAILED',
-        `The AS24 PDF parser failed on "${fileName}".`,
-        'Check that the file is an AS24 invoice in a supported format (Cards Filling List or PASSango sections expected).',
-        err
+        'type-detection',
+        'UNSUPPORTED_PDF_PROVIDER',
+        `The PDF provider "${provider}" is not supported.`,
+        'Only AS24 and DKV PDF invoices are supported.'
       );
     }
 
     if (!parseResult || parseResult.invoiceRows.length === 0) {
       return stageError(
         'core-parse',
-        'AS24_NO_ROWS',
+        'PDF_NO_ROWS',
         `No transactions were found in "${fileName}".`,
-        'Verify the file contains a Cards Filling List or PASSango section. Empty invoices cannot be imported.'
+        'Verify the file contains valid transactions. Empty invoices cannot be imported.'
       );
+    }
+
+    // Populate sourceFileName in sourceEvidence
+    for (const row of parseResult.invoiceRows) {
+      if (row.sourceEvidence) {
+        (row.sourceEvidence as any).sourceFileName = fileName;
+      }
     }
 
     rowCount = parseResult.invoiceRows.length;
@@ -273,7 +302,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // ── summary-generation (optional — must not block import) ─────────────────
     try {
       uploadSummary = await generateUploadSummary(
-        buffer, mimeType || 'application/pdf', fileName, 'AS24', 'INVOICE',
+        buffer, mimeType || 'application/pdf', fileName, provider as 'AS24' | 'DKV', 'INVOICE',
         pageCount, warnings, parseResult.invoiceRows
       );
     } catch (err) {
@@ -283,28 +312,43 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     if (parseResult.statement) {
       as24Statement = {
-        statementNumber: parseResult.statement.statementNumber,
-        statementDate: parseResult.statement.statementDate,
+        statementNumber: parseResult.statement.statementNumber || parseResult.statement.documentNumber,
+        statementDate: parseResult.statement.statementDate || parseResult.statement.documentDate,
       };
     }
 
-    // AS24 control-total audit
+    // Control-total audit
     if (parseResult.statement) {
       try {
-        const recalcGross = parseResult.invoiceRows.reduce(
-          (sum: number, r: any) => sum + parseFloat(r.baseValueGross || '0'), 0
-        );
-        const stmtGross = parseFloat(parseResult.statement.totalGrossAmount || '0');
-        const diff = Math.abs(recalcGross - stmtGross);
-        controlTotalStatus = diff > 5.00 ? 'unmatched' : 'matched';
-        if (diff > 5.00) {
-          warningCount++;
-          warnings.push(
-            `CONTROL_TOTAL_FAILURE: Recalculated gross (€${recalcGross.toFixed(2)}) does not match statement total (€${stmtGross.toFixed(2)}) within €5.00 tolerance (diff: €${diff.toFixed(2)}).`
+        if (provider === 'AS24') {
+          const recalcGross = parseResult.invoiceRows.reduce(
+            (sum: number, r: any) => sum + parseFloat(r.baseValueGross || '0'), 0
           );
+          const stmtGross = parseFloat(parseResult.statement.totalGrossAmount || '0');
+          const diff = Math.abs(recalcGross - stmtGross);
+          controlTotalStatus = diff > 5.00 ? 'unmatched' : 'matched';
+          if (diff > 5.00) {
+            warningCount++;
+            warnings.push(
+              `CONTROL_TOTAL_FAILURE: Recalculated gross (€${recalcGross.toFixed(2)}) does not match statement total (€${stmtGross.toFixed(2)}) within €5.00 tolerance (diff: €${diff.toFixed(2)}).`
+            );
+          }
+        } else if (provider === 'DKV') {
+          const recalcGross = parseResult.invoiceRows.reduce(
+            (sum: number, r: any) => sum + parseFloat(r.valueInPayCurrency || '0'), 0
+          );
+          const stmtGross = parseFloat(parseResult.statement.statementTotalPaymentCurrency || '0');
+          const diff = Math.abs(recalcGross - stmtGross);
+          controlTotalStatus = diff > 5.00 ? 'unmatched' : 'matched';
+          if (diff > 5.00) {
+            warningCount++;
+            warnings.push(
+              `CONTROL_TOTAL_FAILURE: Recalculated gross (€${recalcGross.toFixed(2)}) does not match statement total (€${stmtGross.toFixed(2)}) within €5.00 tolerance (diff: €${diff.toFixed(2)}).`
+            );
+          }
         }
       } catch {
-        // Non-fatal — control total audit is advisory
+        // Non-fatal
       }
     }
 
@@ -357,6 +401,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     warningCount = warnings.length;
     pageCount = workbook.SheetNames.length;
 
+    // Update sourceFileName in sourceEvidence
+    for (const point of parseResult.points) {
+      if (point.sourceEvidence) {
+        (point.sourceEvidence as any).sourceFileName = fileName;
+        (point.sourceEvidence as any).worksheetName = firstSheetName;
+      }
+    }
+
     // Persist rows
     try {
       const rowsToSave = parseResult.points.map((row: any, idx: number) => ({
@@ -385,6 +437,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   } else {
     // ── DKV / Station spreadsheet ─────────────────────────────────────────────
     let workbook: any;
+    let parseResult: any;
     try {
       workbook = XLSX.read(buffer, { type: 'buffer' });
     } catch (err) {
@@ -397,9 +450,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (provider === 'DKV' && documentType === 'TRANSACTION') {
       const worksheet = workbook.Sheets[firstSheetName!];
       const rawJsonRows = XLSX.utils.sheet_to_json<unknown[]>(worksheet!, { header: 1 });
-      let parseResult: any;
       try {
-        parseResult = parseDKVTransactions(rawJsonRows, fileId);
+        parseResult = parseDKVTransactions(rawJsonRows, fileId, firstSheetName || undefined);
       } catch (err) {
         return stageError('core-parse', 'DKV_TX_PARSE_FAILED', `The DKV transaction parser failed on "${fileName}".`, 'Ensure the file is a DKV transaction export in a supported format.', err);
       }
@@ -407,6 +459,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       warnings = parseResult.warnings || [];
       warningCount = warnings.length;
       parserVersion = `Variant ${parseResult.variant}`;
+
+      // Update sourceFileName in sourceEvidence
+      for (const tx of parseResult.transactions) {
+        if (tx.sourceEvidence) {
+          (tx.sourceEvidence as any).sourceFileName = fileName;
+        }
+      }
+
       try {
         db.insertMany('import_rows', parseResult.rawRows.map((row: any) => ({
           import_file_id: fileId, sheet_name: firstSheetName, source_row_number: row.rowIndex,
@@ -428,13 +488,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const rawJsonRows = XLSX.utils.sheet_to_json<unknown[]>(worksheet!, { header: 1 });
       let parseResult: any;
       try {
-        parseResult = parseDKVInvoice(rawJsonRows, fileId);
+        parseResult = parseDKVInvoice(rawJsonRows, fileId, firstSheetName || undefined);
       } catch (err) {
         return stageError('core-parse', 'DKV_INV_PARSE_FAILED', `The DKV invoice parser failed on "${fileName}".`, 'Ensure the file is a DKV invoice export in a supported format.', err);
       }
       rowCount = parseResult.invoiceRows.length;
       warnings = parseResult.warnings || [];
       warningCount = warnings.length;
+
+      // Update sourceFileName in sourceEvidence
+      for (const row of parseResult.invoiceRows) {
+        if (row.sourceEvidence) {
+          (row.sourceEvidence as any).sourceFileName = fileName;
+        }
+      }
+
       try {
         db.insertMany('import_rows', parseResult.rawRows.map((row: any) => ({
           import_file_id: fileId, sheet_name: firstSheetName, source_row_number: row.rowIndex,

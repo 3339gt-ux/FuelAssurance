@@ -259,6 +259,7 @@ export interface CanonicalTransaction {
 
   // Provider
   readonly provider: CardProvider;
+  readonly sourceEvidence?: SourceEvidence;
 }
 
 /** Normalised invoice row (from DKV or AS24 invoice data). */
@@ -358,6 +359,27 @@ export interface CanonicalInvoiceRow {
     readonly paymentAmountExVat?: FinancialFieldMetadata;
     readonly volume?: FinancialFieldMetadata;
   };
+  readonly sourceEvidence?: SourceEvidence;
+}
+
+export interface SourceEvidence {
+  readonly sourceFileId: string;
+  readonly sourceFileName: string;
+  readonly sourceType: 'AS24_PDF' | 'DKV_PDF' | 'DKV_DAILY_XLS' | 'DKV_INVOICE_XLS' | 'GPS_XLS';
+  readonly pageNumber?: number;
+  readonly worksheetName?: string;
+  readonly rowNumber?: number;
+  readonly columnRange?: string;
+  readonly boundingBox?: {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+  };
+  readonly rawText?: string;
+  readonly extractedFields: Record<string, unknown>;
+  readonly confidence: number;
+  readonly parserVersion: string;
 }
 
 export interface FinancialFieldMetadata {
@@ -401,6 +423,7 @@ export interface CanonicalTelematicsPoint {
   readonly locationAddress: string;
   readonly latitude: number | null;
   readonly longitude: number | null;
+  readonly sourceEvidence?: SourceEvidence;
 }
 
 /** Normalised station from the approved-station workbook. */

@@ -246,3 +246,31 @@
     font-variant-numeric: tabular-nums;
   }
 }
+
+/* Density Overrides */
+.density-compact table tr th,
+.density-compact table tr td,
+.density-compact .density-row {
+  padding-top: 4px !important;
+  padding-bottom: 4px !important;
+  height: 30px !important;
+  font-size: 11px !important;
+}
+
+.density-compact .density-card {
+  padding: 0.5rem 0.75rem !important;
+}
+
+.density-comfortable table tr th,
+.density-comfortable table tr td,
+.density-comfortable .density-row {
+  padding-top: 12px !important;
+  padding-bottom: 12px !important;
+  height: 48px !important;
+  font-size: 13px !important;
+}
+
+.density-comfortable .density-card {
+  padding: 1.25rem 1.5rem !important;
+}
+

@@ -19,6 +19,7 @@ import {
   CardProvider,
   TimestampPrecision,
   type FinancialFieldMetadata,
+  type SourceEvidence,
 } from '@/domain/types';
 import { generateId, normaliseCardNumber, normaliseStationCode } from '@/lib/utils';
 import {
@@ -582,6 +583,24 @@ export function parseCardFillingListFallback(text: string, fileId: string): Cano
       ? 10
       : 50;
 
+    const sourceEvidence: SourceEvidence = {
+      sourceFileId: fileId,
+      sourceFileName: '',
+      sourceType: 'AS24_PDF',
+      rawText: line,
+      extractedFields: {
+        registration: currentReg,
+        cardNumber: currentCard,
+        productCode,
+        productName,
+        quantity: volVal.volume,
+        baseValueNet: rightNums.amountExVat,
+        valueInPayCurrency: rightNums.amountInclVat,
+      },
+      confidence,
+      parserVersion: PARSER_VERSION_FALLBACK,
+    };
+
     rows.push({
       id: generateId(),
       importFileId: fileId,
@@ -670,7 +689,8 @@ export function parseCardFillingListFallback(text: string, fileId: string): Cano
           parserConfidence: confidence,
           isFallback: true,
         }
-      }
+      },
+      sourceEvidence,
     });
   }
 
@@ -766,6 +786,24 @@ export function parsePASSangoSectionFallback(text: string, fileId: string): Cano
 
       const finVal = validateFinancials(netAmount, grossAmount, ProductType.TOLL, { allowZeroNet: true });
 
+      const sourceEvidence: SourceEvidence = {
+        sourceFileId: fileId,
+        sourceFileName: '',
+        sourceType: 'AS24_PDF',
+        rawText: line,
+        extractedFields: {
+          registration: currentReg,
+          cardNumber: currentObuId,
+          reference,
+          regionName,
+          distance,
+          netAmount,
+          grossAmount,
+        },
+        confidence: finVal.status === 'OK' ? 100 : 70,
+        parserVersion: PARSER_VERSION_FALLBACK,
+      };
+
       rows.push({
         id: generateId(),
         importFileId: fileId,
@@ -821,6 +859,7 @@ export function parsePASSangoSectionFallback(text: string, fileId: string): Cano
           ...finVal.warnings
         ],
         status: finVal.status,
+        sourceEvidence,
       });
     }
   }
@@ -985,6 +1024,37 @@ function parseAS24PDFCoordinate(
 
         const extractionConfidence = finalStatus === 'PARSER_MAPPING_ERROR' ? 30 : (finalStatus === 'Needs field review' ? 70 : 100);
 
+        const minRowX = Math.min(...row.map(i => i.x));
+        const maxRowX = Math.max(...row.map(i => i.x + i.width));
+        const minRowY = Math.min(...row.map(i => i.y));
+        const maxRowY = Math.max(...row.map(i => i.y + i.height));
+
+        const sourceEvidence: SourceEvidence = {
+          sourceFileId: fileId,
+          sourceFileName: '',
+          sourceType: 'AS24_PDF',
+          pageNumber: page.pageNum,
+          boundingBox: {
+            x: minRowX,
+            y: minRowY,
+            width: maxRowX - minRowX,
+            height: maxRowY - minRowY,
+          },
+          rawText: rowText,
+          extractedFields: {
+            registration: currentReg,
+            cardNumber: currentCard,
+            dateTime: dateTimeVal,
+            stationName: (cols[3] ?? '').trim(),
+            productName: lastProductName,
+            volume: volumeVal.volume,
+            amountExVat: (cols[14] ?? '').trim(),
+            amountInclVat: (cols[15] ?? '').trim(),
+          },
+          confidence: extractionConfidence,
+          parserVersion: PARSER_VERSION_COORDINATE,
+        };
+
         rows.push({
           id: generateId(),
           importFileId: fileId,
@@ -1072,7 +1142,8 @@ function parseAS24PDFCoordinate(
               isPaymentCurrency: false,
               parserConfidence: extractionConfidence,
             }
-          }
+          },
+          sourceEvidence,
         });
       }
     }
@@ -1132,6 +1203,37 @@ function parseAS24PDFCoordinate(
 
         const finVal = validateFinancials(netAmount, grossAmount, ProductType.TOLL, { allowZeroNet: true });
 
+        const minRowX = Math.min(...row.map(i => i.x));
+        const maxRowX = Math.max(...row.map(i => i.x + i.width));
+        const minRowY = Math.min(...row.map(i => i.y));
+        const maxRowY = Math.max(...row.map(i => i.y + i.height));
+
+        const sourceEvidence: SourceEvidence = {
+          sourceFileId: fileId,
+          sourceFileName: '',
+          sourceType: 'AS24_PDF',
+          pageNumber: page.pageNum,
+          boundingBox: {
+            x: minRowX,
+            y: minRowY,
+            width: maxRowX - minRowX,
+            height: maxRowY - minRowY,
+          },
+          rawText: rowText,
+          extractedFields: {
+            registration: currentReg,
+            obuId: currentObuId,
+            date: dateVal,
+            reference,
+            regionName,
+            distance,
+            netAmount,
+            grossAmount,
+          },
+          confidence: finVal.status === 'OK' ? 100 : 70,
+          parserVersion: PARSER_VERSION_COORDINATE,
+        };
+
         rows.push({
           id: generateId(),
           importFileId: fileId,
@@ -1184,6 +1286,7 @@ function parseAS24PDFCoordinate(
           provider: CardProvider.AS24,
           warnings: finVal.warnings,
           status: finVal.status,
+          sourceEvidence,
         });
       }
     }

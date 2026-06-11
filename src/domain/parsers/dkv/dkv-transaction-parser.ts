@@ -92,7 +92,8 @@ export interface DKVTransactionParseResult {
  */
 export function parseDKVTransactions(
   rows: unknown[][],
-  fileId: string
+  fileId: string,
+  sheetName?: string
 ): DKVTransactionParseResult {
   const warnings: string[] = [];
 
@@ -191,6 +192,23 @@ export function parseDKVTransactions(
 
     const productType = detectProductType(raw.productCode, raw.product, raw.productGroup);
 
+    const sourceEvidence = {
+      sourceFileId: fileId,
+      sourceFileName: '',
+      sourceType: 'DKV_DAILY_XLS' as const,
+      worksheetName: sheetName || 'Sheet1',
+      rowNumber: i + 1,
+      extractedFields: {
+        licencePlate: raw.licencePlate,
+        authorisationTime: raw.authorisationTime,
+        sales: raw.sales,
+        product: raw.product,
+        authorisationAmountGross: raw.authorisationAmountGross,
+      },
+      confidence: 100,
+      parserVersion: '1.0.0',
+    };
+
     const canonical: CanonicalTransaction = {
       id: generateId(),
       importFileId: fileId,
@@ -223,6 +241,7 @@ export function parseDKVTransactions(
       cardAddition: raw.cardAddition || '',
       stationCategory: raw.stationCategory || '',
       provider: CardProvider.DKV,
+      sourceEvidence,
     };
 
     transactions.push(canonical);
