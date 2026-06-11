@@ -3,6 +3,8 @@ import { db } from '@/lib/db';
 import { assessTransaction } from '@/domain/telematics/telematics-scorer';
 import { normalizeRegistration } from '@/config/fleet-registry';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);

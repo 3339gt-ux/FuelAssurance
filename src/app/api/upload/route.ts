@@ -130,6 +130,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const cached = getCachedParse(hash, CURRENT_PARSER_VERSION);
   if (cached) {
+    const batch = db.find('transaction_batches', (b: any) => b.id === cached.fileId);
+    const resolvedSourceType = batch?.sourceType || (cached.provider === 'AS24' ? 'AS24 Invoice PDF' : cached.provider === 'DKV' ? (isPDF ? 'DKV Invoice PDF' : cached.documentType === 'TRANSACTION' ? 'DKV Daily Transactions' : 'DKV Invoice-Period Transactions') : 'DKV Invoice-Period Transactions');
+
     return NextResponse.json({
       success: true,
       fileId: cached.fileId,
@@ -139,6 +142,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       documentType: cached.documentType,
       uploadSummary: cached.uploadSummary as UploadResponse extends { uploadSummary?: infer U } ? U : never,
       gpsSummary: cached.gpsSummary as UploadResponse extends { gpsSummary?: infer U } ? U : never,
+      sourceType: resolvedSourceType,
     } satisfies UploadResponse);
   }
 
@@ -148,16 +152,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const storedMeta = existingFile.metadata || {};
     const storedUploadSummary = storedMeta.uploadSummary || null;
     const storedGpsSummary = storedMeta.gpsSummary || null;
+    const resolvedProvider = existingFile.provider || provider;
+    const resolvedDocType = existingFile.document_type || documentType;
+    const batch = db.find('transaction_batches', (b: any) => b.id === existingFile.id);
+    const resolvedSourceType = batch?.sourceType || (resolvedProvider === 'AS24' ? 'AS24 Invoice PDF' : resolvedProvider === 'DKV' ? (existingFile.file_name?.toLowerCase().endsWith('.pdf') || isPDF ? 'DKV Invoice PDF' : resolvedDocType === 'TRANSACTION' ? 'DKV Daily Transactions' : 'DKV Invoice-Period Transactions') : 'DKV Invoice-Period Transactions');
 
     return NextResponse.json({
       success: true,
       fileId: existingFile.id,
       message: 'File already imported previously',
       alreadyImported: true,
-      provider: existingFile.provider || provider,
-      documentType: existingFile.document_type || documentType,
+      provider: resolvedProvider,
+      documentType: resolvedDocType,
       uploadSummary: storedUploadSummary,
       gpsSummary: storedGpsSummary,
+      sourceType: resolvedSourceType,
     } satisfies UploadResponse);
   }
 

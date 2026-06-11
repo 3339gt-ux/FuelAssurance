@@ -4,6 +4,8 @@ import { assessTransaction } from '@/domain/telematics/telematics-scorer';
 import { TelematicsClassification, ProductType } from '@/domain/types';
 import { normalizeRegistration } from '@/config/fleet-registry';
 
+export const dynamic = 'force-dynamic';
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -171,6 +173,8 @@ export async function POST(req: NextRequest) {
       check_date: new Date().toISOString(),
       transaction_file_name: txFile.file_name,
       gps_file_name: gpsFile.file_name,
+      transactionFileId,
+      gpsFileId,
       total_transactions: vehicleTxs.length,
       supported_count: supported,
       likely_supported_count: likelySupported,
@@ -181,6 +185,63 @@ export async function POST(req: NextRequest) {
       excluded_transactions_count: otherTxs.length,
       results,
     });
+
+    // 6. Update transaction batch in database if it exists
+    const batch = db.find('transaction_batches', (b: any) => b.id === transactionFileId);
+    if (batch) {
+      const attachedGpsFiles = [...(batch.attachedGpsFiles || [])];
+      const vehicleStatuses = { ...(batch.vehicleStatuses || batch.vehicleCheckStatuses || {}) };
+      const checkResults = { ...(batch.checkResults || batch.verificationResults || {}) };
+      const cleanGpsReg = selectedVehicle.replace(/\s+/g, '').toUpperCase();
+
+      const existingAttachmentIdx = attachedGpsFiles.findIndex(
+        (a: any) => normalizeRegistration(a.vehicleRegistration) === normalizeRegistration(cleanGpsReg)
+      );
+
+      const timestamps = gpsPoints.map((p: any) => p.timestamp).filter(Boolean).sort();
+      const coverageStart = timestamps[0] || '';
+      const coverageEnd = timestamps[timestamps.length - 1] || '';
+
+      const attachmentInfo = {
+        fileName: gpsFile.file_name,
+        fileHash: gpsFile.file_hash,
+        vehicleRegistration: cleanGpsReg,
+        uploadedAt: new Date().toISOString(),
+        coverageStart,
+        coverageEnd,
+      };
+
+      if (existingAttachmentIdx !== -1) {
+        attachedGpsFiles[existingAttachmentIdx] = attachmentInfo;
+      } else {
+        attachedGpsFiles.push(attachmentInfo);
+      }
+
+      const hasMappingErrors = vehicleTxs.some((tx: any) => tx.status === 'PARSER_MAPPING_ERROR');
+      vehicleStatuses[cleanGpsReg] = hasMappingErrors ? 'Review required' : 'Check completed';
+      
+      checkResults[cleanGpsReg] = {
+        results,
+        supported,
+        likelySupported,
+        unsupported,
+        insufficient,
+        reviewRequired,
+      };
+
+      db.update('transaction_batches', transactionFileId, {
+        attachedGpsFiles,
+        vehicleStatuses,
+        vehicleCheckStatuses: vehicleStatuses,
+        checkResults,
+        verificationResults: checkResults,
+        processingStatus: Object.values(vehicleStatuses).every((s) => s === 'Check completed')
+          ? 'checks_complete'
+          : attachedGpsFiles.length > 0
+            ? 'gps_partial'
+            : 'parsed',
+      });
+    }
 
     return NextResponse.json({
       success: true,
@@ -204,12 +265,26 @@ export async function GET(req: NextRequest) {
       if (!check) {
         return NextResponse.json({ error: 'Check not found' }, { status: 404 });
       }
-      return NextResponse.json({ check });
+      let batchId = check.transactionFileId;
+      if (!batchId) {
+        const batch = db.find('transaction_batches', (b: any) => b.filename === check.transaction_file_name);
+        if (batch) batchId = batch.id;
+      }
+      return NextResponse.json({ check, batchId });
     }
 
     const checks = db.select('simple_checks');
+    const enrichedChecks = checks.map((c: any) => {
+      let batchId = c.transactionFileId;
+      if (!batchId) {
+        const batch = db.find('transaction_batches', (b: any) => b.filename === c.transaction_file_name);
+        if (batch) batchId = batch.id;
+      }
+      return { ...c, batchId };
+    });
+    
     // Sort by check_date descending
-    const sorted = [...checks].sort((a: any, b: any) => 
+    const sorted = [...enrichedChecks].sort((a: any, b: any) => 
       new Date(b.check_date).getTime() - new Date(a.check_date).getTime()
     );
 

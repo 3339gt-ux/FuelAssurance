@@ -4,6 +4,8 @@ import fs from 'fs';
 import path from 'path';
 import * as XLSX from 'xlsx';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const { searchParams } = new URL(req.url);
   const fileId = searchParams.get('fileId') || searchParams.get('batchId');

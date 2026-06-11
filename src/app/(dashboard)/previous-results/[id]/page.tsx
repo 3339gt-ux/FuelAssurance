@@ -30,6 +30,10 @@ export default function CheckResultDetailsPage() {
     fetch(`/api/check-transactions?id=${id}`)
       .then((res) => res.json())
       .then((data) => {
+        if (data.batchId) {
+          router.replace(`/batches?id=${data.batchId}&tab=transactions`);
+          return;
+        }
         if (data.check) {
           setCheck(data.check);
           const results = data.check.results || [];
@@ -45,7 +49,7 @@ export default function CheckResultDetailsPage() {
         console.error(err);
         setLoading(false);
       });
-  }, [id, expandParam]);
+  }, [id, expandParam, router]);
 
   if (loading) {
     return (

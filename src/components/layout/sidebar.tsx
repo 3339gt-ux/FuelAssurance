@@ -134,6 +134,21 @@ export function Sidebar() {
         })}
       </nav>
 
+      {/* Build Info */}
+      {!collapsed && (
+        <div className="px-5 py-3 border-t border-surface-300 text-[10px] font-mono text-gray-400 bg-gray-50/50 dark:bg-gray-900/10">
+          <p className="truncate" title="antigravity/fuel-assurance-source-preview-review-workspace">
+            <span className="font-semibold text-gray-500">Branch:</span> source-preview-review-workspace
+          </p>
+          <p className="truncate" title="be9c266c6148bdc03acb141065d3945e96af4675">
+            <span className="font-semibold text-gray-500">Commit:</span> be9c266
+          </p>
+          <p>
+            <span className="font-semibold text-gray-500">Build:</span> June 11, 2026 15:20
+          </p>
+        </div>
+      )}
+
       {/* Collapse toggle */}
       <div className="border-t border-surface-300 p-3">
         <button

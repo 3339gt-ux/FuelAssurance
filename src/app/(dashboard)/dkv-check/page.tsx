@@ -190,6 +190,7 @@ export default function DKVCheckPage() {
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
       'application/vnd.ms-excel': ['.xls'],
       'text/csv': ['.csv'],
+      'application/pdf': ['.pdf'],
     },
     multiple: false,
     disabled: isProcessing,
@@ -290,7 +291,7 @@ export default function DKVCheckPage() {
       });
       const data = await res.json();
       if (data.success && data.checkId) {
-        router.push(`/previous-results/${data.checkId}`);
+        router.push(`/batches?id=${uploadSummary.fileId}&tab=transactions`);
       } else {
         setCheckError({
           fileName: 'check-transactions', fileType: 'Verification', stage: 'check-execution',
@@ -394,8 +395,8 @@ export default function DKVCheckPage() {
                     }}
                   />
                   <Upload className="h-10 w-10 text-slate-400 mb-3" />
-                  <p className="text-sm font-bold text-slate-800 dark:text-surface-950">Drag and drop DKV report here</p>
-                  <p className="text-2xs text-slate-400 mt-1">Daily authorisation, weekly reports, or invoice-period transaction files (XLS, XLSX, CSV)</p>
+                  <p className="text-sm font-bold text-slate-800 dark:text-surface-950">Drag and drop DKV report or PDF invoice here</p>
+                  <p className="text-2xs text-slate-400 mt-1">Daily authorisation, weekly reports, invoice-period Excel sheets, or DKV PDF invoice (XLS, XLSX, CSV, PDF)</p>
                 </div>
               ) : uploadSummary ? (
                 <div className="space-y-6 animate-slide-down">
@@ -413,7 +414,7 @@ export default function DKVCheckPage() {
                     <div className="flex items-center gap-2 p-3 rounded-xl bg-brand-500/5 border border-brand-200 text-xs">
                       <CheckCircle2 className="h-4 w-4 text-brand-600" />
                       <span>Detected source: <strong>{detectedSourceType}</strong> — saved as reusable transaction batch</span>
-                      <a href={`/batches`} className="ml-auto text-brand-700 font-semibold hover:underline">Open batch workspace →</a>
+                      <a href={`/batches?id=${uploadSummary.fileId}&tab=transactions`} className="ml-auto text-brand-700 font-semibold hover:underline">Open batch workspace →</a>
                     </div>
                   )}
 

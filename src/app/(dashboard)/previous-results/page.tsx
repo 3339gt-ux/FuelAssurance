@@ -139,7 +139,7 @@ export default function PreviousResultsPage() {
                     <td className="px-5 py-3 text-right">
                       <div className="flex items-center justify-end gap-2">
                         <Link
-                          href={`/previous-results/${check.id}`}
+                          href={check.batchId ? `/batches?id=${check.batchId}&tab=transactions` : `/previous-results/${check.id}`}
                           className="btn btn-secondary btn-sm text-2xs px-2.5 py-1"
                         >
                           Open

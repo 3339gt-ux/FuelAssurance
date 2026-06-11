@@ -179,6 +179,13 @@ export default function SettingsPage() {
           >
             <Save className="h-4 w-4" /> Save Settings
           </button>
+
+          <div className="pt-4 border-t border-slate-200 dark:border-surface-300 space-y-1 text-[10px] font-mono text-slate-400">
+            <p className="font-semibold text-slate-505 uppercase tracking-wider text-[8px]">Platform Diagnostic Info</p>
+            <p><span className="font-semibold">Branch:</span> antigravity/fuel-assurance-source-preview-review-workspace</p>
+            <p className="truncate" title="be9c266c6148bdc03acb141065d3945e96af4675"><span className="font-semibold">Commit:</span> be9c266c6148bdc03acb141065d3945e96af4675</p>
+            <p><span className="font-semibold">Build:</span> June 11, 2026 15:20</p>
+          </div>
         </div>
       </form>
     </div>

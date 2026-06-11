@@ -303,7 +303,7 @@ export default function AS24CheckPage() {
       });
       const data = await res.json();
       if (data.success && data.checkId) {
-        router.push(`/previous-results/${data.checkId}`);
+        router.push(`/batches?id=${uploadSummary.fileId}&tab=transactions`);
       } else {
         setPdfError({
           fileName: 'check-transactions',
@@ -503,7 +503,7 @@ export default function AS24CheckPage() {
                     <button onClick={() => setStep(2)} className="btn btn-primary w-full text-xs font-semibold py-3 flex items-center justify-center gap-1">
                       Continue to Step 2: Upload GPS Telematics <ChevronRight className="h-4 w-4" />
                     </button>
-                    <a href="/batches" className="btn btn-secondary w-full text-xs py-2.5 flex items-center justify-center gap-1 text-slate-600">
+                    <a href={`/batches?id=${uploadSummary.fileId}&tab=transactions`} className="btn btn-secondary w-full text-xs py-2.5 flex items-center justify-center gap-1 text-slate-600">
                       View in Transaction Batches workspace <ChevronRight className="h-3.5 w-3.5" />
                     </a>
                   </div>

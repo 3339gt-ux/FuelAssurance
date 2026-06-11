@@ -1,6 +1,6 @@
 'use client';
 import React, { useState, useEffect, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useDropzone } from 'react-dropzone';
 import {
   Layers,
@@ -136,8 +136,12 @@ function GpsDropZone({ batchId, vehicleReg, onDone }: { batchId: string; vehicle
   );
 }
 
-export default function BatchesPage() {
+function BatchesPageContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const batchIdParam = searchParams.get('id');
+  const tabParam = searchParams.get('tab');
+
   const [batches, setBatches] = useState<BatchRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -191,7 +195,7 @@ export default function BatchesPage() {
   }, [fetchBatches]);
 
   // Load selected batch details
-  const fetchBatchDetails = async (id: string) => {
+  const fetchBatchDetails = useCallback(async (id: string) => {
     setLoadingBatchData(true);
     try {
       const res = await fetch(`/api/batches/${id}`);
@@ -252,18 +256,31 @@ export default function BatchesPage() {
     } finally {
       setLoadingBatchData(false);
     }
-  };
+  }, []);
+
+  // Synchronize workspace selection state with query parameters
+  useEffect(() => {
+    if (batchIdParam) {
+      setSelectedBatchId(batchIdParam);
+      fetchBatchDetails(batchIdParam);
+      if (tabParam && ['overview', 'vehicles', 'transactions', 'exceptions', 'gps', 'source', 'reports'].includes(tabParam)) {
+        setActiveTab(tabParam as any);
+      } else {
+        setActiveTab('overview');
+      }
+    } else {
+      setSelectedBatchId(null);
+      setActiveBatch(null);
+      setTransactions([]);
+    }
+  }, [batchIdParam, tabParam, fetchBatchDetails]);
 
   const handleOpenWorkspace = (id: string) => {
-    setSelectedBatchId(id);
-    fetchBatchDetails(id);
-    setActiveTab('overview');
+    router.push(`/batches?id=${id}`);
   };
 
   const handleCloseWorkspace = () => {
-    setSelectedBatchId(null);
-    setActiveBatch(null);
-    setTransactions([]);
+    router.push('/batches');
     fetchBatches();
   };
 
@@ -1011,5 +1028,18 @@ export default function BatchesPage() {
       )}
 
     </div>
+  );
+}
+
+export default function BatchesPage() {
+  return (
+    <React.Suspense fallback={
+      <div className="py-16 flex flex-col items-center justify-center gap-3">
+        <Loader2 className="w-8 h-8 text-indigo-500 animate-spin" />
+        <span className="text-xs text-gray-500 font-medium">Loading review workspace...</span>
+      </div>
+    }>
+      <BatchesPageContent />
+    </React.Suspense>
   );
 }
