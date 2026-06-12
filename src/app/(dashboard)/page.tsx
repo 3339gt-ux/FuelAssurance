@@ -5,6 +5,8 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { CreditCard, FileText, ChevronRight, History, Calendar, CheckCircle2, AlertTriangle, XCircle, Trash2 } from 'lucide-react';
 
+import RecentWorkList from '@/components/RecentWorkList';
+
 export default function SimpleHomePage() {
   const router = useRouter();
   const [mode, setMode] = useState<'simple' | 'advanced' | null>(null);
@@ -26,7 +28,6 @@ export default function SimpleHomePage() {
       .then((res) => res.json())
       .then((data) => {
         if (data.checks) {
-          // Limit to 5 most recent
           setHistory(data.checks.slice(0, 5));
         }
         setLoading(false);
@@ -118,6 +119,9 @@ export default function SimpleHomePage() {
           </Link>
         </div>
       </div>
+
+      {/* Continue Review area */}
+      <RecentWorkList />
 
       {/* Recent History Table */}
       <div className="space-y-4">

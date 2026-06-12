@@ -71,6 +71,16 @@ interface BatchRecord {
   customerNumber?: string;
   transactionCount?: number;
   parserVersion?: string;
+  approvalStatus?: string;
+  reviewerNotes?: string;
+  approvalNotes?: string;
+  auditHistory?: Array<{
+    id: string;
+    timestamp: string;
+    user: string;
+    action: string;
+    details: string;
+  }>;
 }
 
 function GpsDropZone({ batchId, vehicleReg, onDone }: { batchId: string; vehicleReg: string; onDone: () => void }) {
@@ -151,7 +161,8 @@ function BatchesPageContent() {
   const [activeBatch, setActiveBatch] = useState<BatchRecord | null>(null);
   const [transactions, setTransactions] = useState<any[]>([]);
   const [loadingBatchData, setLoadingBatchData] = useState(false);
-  const [activeTab, setActiveTab] = useState<'overview' | 'vehicles' | 'transactions' | 'exceptions' | 'gps' | 'source' | 'reports'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'vehicles' | 'transactions' | 'exceptions' | 'gps' | 'source' | 'reports' | 'approval'>('overview');
+  const [selectedVehicle, setSelectedVehicle] = useState<string | null>(null);
   
   // Global density setting
   const [density, setDensity] = useState<'compact' | 'comfortable'>('compact');
@@ -167,6 +178,36 @@ function BatchesPageContent() {
     document.documentElement.classList.add(`density-${mode}`);
     document.documentElement.classList.remove(`density-${mode === 'compact' ? 'comfortable' : 'compact'}`);
   }, []);
+
+  // Sync review state to localStorage
+  useEffect(() => {
+    if (!selectedBatchId) return;
+    const state = {
+      batchId: selectedBatchId,
+      currentTab: activeTab,
+      selectedVehicle,
+      densityMode: density,
+      lastUpdatedAt: new Date().toISOString(),
+    };
+    localStorage.setItem(`fuel_review_state_${selectedBatchId}`, JSON.stringify(state));
+    localStorage.setItem('fuel_last_active_batch_id', selectedBatchId);
+  }, [selectedBatchId, activeTab, selectedVehicle, density]);
+
+  // Load state from localStorage on load
+  useEffect(() => {
+    if (!selectedBatchId) return;
+    const cached = localStorage.getItem(`fuel_review_state_${selectedBatchId}`);
+    if (cached) {
+      try {
+        const state = JSON.parse(cached);
+        if (state.currentTab) setActiveTab(state.currentTab as any);
+        if (state.selectedVehicle) setSelectedVehicle(state.selectedVehicle);
+        if (state.densityMode) setDensity(state.densityMode);
+      } catch (e) {
+        console.error('Error loading persistent review state:', e);
+      }
+    }
+  }, [selectedBatchId]);
 
   const toggleDensity = () => {
     const newMode = density === 'compact' ? 'comfortable' : 'compact';
@@ -263,7 +304,7 @@ function BatchesPageContent() {
     if (batchIdParam) {
       setSelectedBatchId(batchIdParam);
       fetchBatchDetails(batchIdParam);
-      if (tabParam && ['overview', 'vehicles', 'transactions', 'exceptions', 'gps', 'source', 'reports'].includes(tabParam)) {
+      if (tabParam && ['overview', 'vehicles', 'transactions', 'exceptions', 'gps', 'source', 'reports', 'approval'].includes(tabParam)) {
         setActiveTab(tabParam as any);
       } else {
         setActiveTab('overview');
@@ -294,6 +335,53 @@ function BatchesPageContent() {
     }
   };
 
+  const getUnresolvedBlockingIssuesCount = () => {
+    // 1. Transactions with non-OK status or poor GPS match that aren't verified/likely
+    const unsupportedCount = transactions.filter(t => 
+      t.status !== 'OK' && t.status !== 'Validated' && t.status !== 'VALIDATED' &&
+      t.telematicsAssessment?.classification !== 'VERIFIED' && t.telematicsAssessment?.classification !== 'LIKELY'
+    ).length;
+    
+    // 2. Vehicles without GPS attached
+    const vehiclesWithoutGps = activeBatch?.vehicles.filter(reg => 
+      !activeBatch.attachedGpsFiles?.some(a => a.vehicleRegistration === reg)
+    ).length || 0;
+    
+    return unsupportedCount + vehiclesWithoutGps;
+  };
+
+  const updateApprovalStatus = async (status: string, noteText?: string, notesType: 'reviewer' | 'approval' = 'reviewer') => {
+    if (!activeBatch) return;
+    try {
+      const payload: any = {
+        approvalStatus: status,
+        auditEvent: {
+          action: 'STATUS_CHANGE',
+          details: `Approval workflow state transitioned to ${status.replace(/_/g, ' ').toUpperCase()}`,
+        }
+      };
+      if (noteText !== undefined) {
+        if (notesType === 'reviewer') {
+          payload.reviewerNotes = noteText;
+        } else {
+          payload.approvalNotes = noteText;
+        }
+      }
+      
+      const res = await fetch(`/api/batches/${activeBatch.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (data.success) {
+        fetchBatchDetails(activeBatch.id);
+      }
+    } catch (err) {
+      console.error('Failed to update status', err);
+    }
+  };
+
   const handleConfirmBatch = async () => {
     if (!activeBatch) return;
     try {
@@ -303,6 +391,7 @@ function BatchesPageContent() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ batchId: activeBatch.id }),
       });
+      await updateApprovalStatus('verification_complete', 'Batch verification confirmed and verified.');
       alert('Batch verification complete! Extracted invoice data signed off.');
       fetchBatchDetails(activeBatch.id);
     } catch (err) {
@@ -662,6 +751,7 @@ function BatchesPageContent() {
               { id: 'exceptions', label: 'Exceptions', icon: <AlertTriangle className="w-3.5 h-3.5" /> },
               { id: 'gps', label: 'GPS Files', icon: <Satellite className="w-3.5 h-3.5" /> },
               { id: 'source', label: 'Source Files', icon: <FileText className="w-3.5 h-3.5" /> },
+              { id: 'approval', label: 'Approval', icon: <ShieldCheck className="w-3.5 h-3.5" /> },
               { id: 'reports', label: 'Reports', icon: <BarChart2 className="w-3.5 h-3.5" /> },
             ].map((tab) => (
               <button
@@ -996,6 +1086,182 @@ function BatchesPageContent() {
                       </button>
                     </div>
                   ))}
+                </div>
+              </div>
+            )}
+
+            {/* Approval Tab */}
+            {activeTab === 'approval' && activeBatch && (
+              <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-6 shadow-sm space-y-6 animate-fade-in">
+                <div className="flex flex-wrap items-center justify-between gap-4 border-b border-gray-150 dark:border-gray-800 pb-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                      <ShieldCheck className="w-5 h-5 text-indigo-500" />
+                      Invoice Verification Approval Workflow
+                    </h3>
+                    <p className="text-xs text-gray-550 mt-0.5">
+                      Review extracted data metrics, check exceptions status, and sign off the reconciliation run.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-gray-500 font-medium">Current Stage:</span>
+                    <span className="px-2.5 py-1 rounded text-xs font-bold bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-400 uppercase border border-indigo-200 dark:border-indigo-900/60">
+                      {activeBatch.approvalStatus || 'DRAFT'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Blocker warning block */}
+                {getUnresolvedBlockingIssuesCount() > 0 ? (
+                  <div className="p-4 bg-rose-50 dark:bg-rose-955/20 border border-rose-200 dark:border-rose-900/40 rounded-xl flex items-start gap-3 animate-slide-down">
+                    <AlertTriangle className="w-5 h-5 text-rose-500 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-bold text-xs text-rose-800 dark:text-rose-405 block">
+                        Approval Blocked — {getUnresolvedBlockingIssuesCount()} review items remain
+                      </span>
+                      <p className="text-[10px] text-rose-605 dark:text-rose-455 mt-1 leading-relaxed">
+                        You cannot approve this invoice batch until all transactional warnings, parser mapping failures, or missing vehicle GPS attachments are resolved. Please attach all vehicle GPS telemetry data or resolve parsing exceptions.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-4 bg-green-50 dark:bg-green-950/10 border border-green-200/55 rounded-xl flex items-start gap-3 animate-slide-down">
+                    <CheckCircle2 className="w-5 h-5 text-green-500 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-bold text-xs text-green-800 dark:text-green-400 block">
+                        Extraction Checks Validated
+                      </span>
+                      <p className="text-[10px] text-green-605 dark:text-green-400 mt-1">
+                        All vehicle registrations are mapped, financial totals are matched, and GPS telemetry coverage is complete. This batch is ready for sign-off.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Split grid for notes and summary */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  
+                  {/* Left Column: Metrics Summary */}
+                  <div className="space-y-4">
+                    <span className="font-bold text-xs uppercase tracking-wider block text-gray-700 dark:text-gray-300">Approval Summary Report</span>
+                    <div className="border border-gray-150 dark:border-gray-800 rounded-xl overflow-hidden font-mono text-[10px] divide-y divide-gray-100 dark:divide-gray-850 bg-gray-50/20 dark:bg-black/10">
+                      <div className="flex justify-between p-2.5">
+                        <span>Source File:</span>
+                        <span className="font-sans font-semibold">{activeBatch.filename}</span>
+                      </div>
+                      <div className="flex justify-between p-2.5">
+                        <span>Provider:</span>
+                        <span className="font-sans font-semibold">{activeBatch.provider}</span>
+                      </div>
+                      <div className="flex justify-between p-2.5">
+                        <span>Transaction Count:</span>
+                        <span>{transactions.length} rows</span>
+                      </div>
+                      <div className="flex justify-between p-2.5">
+                        <span>Vehicles Checked:</span>
+                        <span>{activeBatch.vehicles.length} units</span>
+                      </div>
+                      <div className="flex justify-between p-2.5">
+                        <span>GPS Files Attached:</span>
+                        <span>{activeBatch.attachedGpsFiles?.length || 0} files</span>
+                      </div>
+                      <div className="flex justify-between p-2.5 bg-green-50/30 dark:bg-green-950/10">
+                        <span>Supported / Likely verified:</span>
+                        <span className="text-green-600 dark:text-green-400 font-bold">
+                          {transactions.filter(t => t.telematicsAssessment?.classification === 'VERIFIED' || t.telematicsAssessment?.classification === 'LIKELY').length}
+                        </span>
+                      </div>
+                      <div className="flex justify-between p-2.5 bg-amber-50/30 dark:bg-amber-950/10">
+                        <span>Review Required / Insufficient Evidence:</span>
+                        <span className="text-amber-600 dark:text-amber-400 font-bold">
+                          {transactions.filter(t => t.telematicsAssessment?.classification === 'REVIEW' || t.telematicsAssessment?.classification === 'INSUFFICIENT_EVIDENCE').length}
+                        </span>
+                      </div>
+                      <div className="flex justify-between p-2.5 bg-rose-50/30 dark:bg-rose-950/10">
+                        <span>Not Supported:</span>
+                        <span className="text-rose-600 dark:text-rose-400 font-bold">
+                          {transactions.filter(t => t.telematicsAssessment?.classification === 'UNLIKELY').length}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Action buttons */}
+                    <div className="flex flex-wrap gap-2 pt-2">
+                      <button
+                        onClick={() => updateApprovalStatus('extraction_review_pending')}
+                        className="py-1.5 px-3 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-750 text-gray-700 dark:text-gray-300 rounded-lg text-xs font-semibold"
+                      >
+                        Confirm extraction
+                      </button>
+                      <button
+                        onClick={() => updateApprovalStatus('ready_for_gps')}
+                        className="py-1.5 px-3 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-750 text-gray-700 dark:text-gray-300 rounded-lg text-xs font-semibold"
+                      >
+                        Ready for GPS
+                      </button>
+                      <button
+                        disabled={getUnresolvedBlockingIssuesCount() > 0}
+                        onClick={() => updateApprovalStatus('ready_to_approve')}
+                        className="py-1.5 px-3 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950 dark:hover:bg-indigo-900 text-indigo-750 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-900/60 rounded-lg text-xs font-semibold disabled:opacity-50"
+                      >
+                        Mark Ready to Approve
+                      </button>
+                      <button
+                        disabled={getUnresolvedBlockingIssuesCount() > 0}
+                        onClick={() => updateApprovalStatus('approved')}
+                        className="py-1.5 px-4 bg-green-600 hover:bg-green-500 text-white rounded-lg text-xs font-semibold disabled:opacity-50"
+                      >
+                        Approve Invoice
+                      </button>
+                      <button
+                        onClick={() => updateApprovalStatus('needs_review')}
+                        className="py-1.5 px-3 bg-amber-500 hover:bg-amber-400 text-white rounded-lg text-xs font-semibold"
+                      >
+                        Flag for review
+                      </button>
+                      <button
+                        onClick={() => updateApprovalStatus('rejected')}
+                        className="py-1.5 px-3 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-semibold"
+                      >
+                        Reject Batch
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Right Column: Reviewer Notes & Audit Timeline */}
+                  <div className="space-y-4">
+                    <div className="space-y-1.5">
+                      <span className="font-bold text-xs uppercase tracking-wider block text-gray-700 dark:text-gray-300">Reviewer Notes</span>
+                      <textarea
+                        defaultValue={activeBatch.reviewerNotes || ''}
+                        placeholder="Add batch notes, exceptions remarks or validation context..."
+                        onBlur={(e) => updateApprovalStatus(activeBatch.approvalStatus || 'draft', e.target.value)}
+                        className="w-full text-xs p-3 bg-gray-50 dark:bg-gray-855 border border-gray-205 dark:border-gray-800 rounded-xl h-24 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-sans text-gray-800 dark:text-gray-200"
+                      />
+                      <span className="text-[10px] text-gray-400 block">Notes auto-save when clicking outside the text box.</span>
+                    </div>
+
+                    {/* Timeline History */}
+                    <div className="space-y-2">
+                      <span className="font-bold text-xs uppercase tracking-wider block text-gray-700 dark:text-gray-300">Audit Trail History</span>
+                      <div className="max-h-[200px] overflow-y-auto border border-gray-150 dark:border-gray-800 rounded-xl p-3 bg-gray-50/30 dark:bg-black/10 divide-y divide-gray-100 dark:divide-gray-850 text-[10px]">
+                        {!activeBatch.auditHistory || activeBatch.auditHistory.length === 0 ? (
+                          <div className="text-gray-455 dark:text-gray-500 py-2">No audits recorded. Transitions log automatically on status updates.</div>
+                        ) : (
+                          activeBatch.auditHistory.map((item: any, idx: number) => (
+                            <div key={item.id || idx} className="py-2 first:pt-0 last:pb-0">
+                              <div className="flex justify-between font-semibold text-gray-800 dark:text-gray-250">
+                                <span>{item.details}</span>
+                                <span className="text-gray-400 font-normal">{new Date(item.timestamp).toLocaleString()}</span>
+                              </div>
+                              <span className="text-[9px] text-gray-400 mt-0.5 block">By: {item.user}</span>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
                 </div>
               </div>
             )}

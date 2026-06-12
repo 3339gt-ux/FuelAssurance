@@ -19,16 +19,24 @@ interface CompactTransactionTableProps {
   transactions: any[];
   onOpenSourceViewer: (tx: any) => void;
   onOpenEvidenceMatchView: (tx: any) => void;
+  selectedVehicle?: string | null;
 }
 
 export default function CompactTransactionTable({
   transactions,
   onOpenSourceViewer,
   onOpenEvidenceMatchView,
+  selectedVehicle,
 }: CompactTransactionTableProps) {
   const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
-  const [vehicleFilter, setVehicleFilter] = useState('all');
+  const [vehicleFilter, setVehicleFilter] = useState(selectedVehicle || 'all');
+
+  React.useEffect(() => {
+    if (selectedVehicle) {
+      setVehicleFilter(selectedVehicle);
+    }
+  }, [selectedVehicle]);
   const [productFilter, setProductFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
   const [warningFilter, setWarningFilter] = useState('all');

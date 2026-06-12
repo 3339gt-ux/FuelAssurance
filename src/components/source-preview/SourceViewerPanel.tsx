@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import PDFPageRenderer from './PDFPageRenderer';
+import PDFPageRenderer, { type PDFPageRendererRef } from './PDFPageRenderer';
 import { type SourceEvidence } from '@/domain/types';
 import {
   X,
@@ -15,6 +15,11 @@ import {
   Grid,
   History,
   CheckCircle2,
+  Maximize2,
+  Minimize2,
+  RotateCcw,
+  Copy,
+  Check,
 } from 'lucide-react';
 
 interface SourceViewerPanelProps {
@@ -34,15 +39,17 @@ export default function SourceViewerPanel({
   onPrev,
   onNext,
 }: SourceViewerPanelProps) {
-  const [zoomScale, setZoomScale] = useState(1.5);
+  const [zoomScale, setZoomScale] = useState(1.0);
   const [excelData, setExcelData] = useState<any>(null);
   const [loadingExcel, setLoadingExcel] = useState(false);
   const [excelSearch, setExcelSearch] = useState('');
   const [excelRegFilter, setExcelRegFilter] = useState('');
-  const [pdfPageCount, setPdfPageCount] = useState<number | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [jumpRow, setJumpRow] = useState('');
   const [activeTab, setActiveTab] = useState<'source' | 'parsed' | 'history'>('source');
 
   const targetRowRef = useRef<HTMLTableRowElement>(null);
+  const pdfRendererRef = useRef<PDFPageRendererRef>(null);
 
   // Fetch Excel sheet data
   useEffect(() => {
@@ -78,6 +85,31 @@ export default function SourceViewerPanel({
       }, 300);
     }
   }, [excelData, evidence?.rowNumber]);
+
+  // Focus and Keyboard Close handler
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+
+    // Save previous active element to restore focus on close
+    const prevActiveElement = document.activeElement as HTMLElement;
+    
+    // Lock background scroll
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      document.body.style.overflow = originalOverflow;
+      if (prevActiveElement && typeof prevActiveElement.focus === 'function') {
+        prevActiveElement.focus();
+      }
+    };
+  }, [isOpen, onClose]);
 
   if (!isOpen || !evidence) return null;
 
@@ -130,46 +162,39 @@ export default function SourceViewerPanel({
   const getFilteredExcelRows = () => {
     if (!excelData || !excelData.rows) return [];
     
-    // Header row is index excelData.headerRowIndex - 1 (or 0)
     const startIdx = (excelData.headerRowIndex || 1);
     const resultRows: { rowIndex: number; cells: unknown[] }[] = [];
 
-    // Identify registration column index in Excel headers
     const regColIdx = excelData.headerRow.findIndex((h: string) => getHighlightType(h) === 'reg');
 
     for (let i = startIdx; i < excelData.rows.length; i++) {
       const rCells = excelData.rows[i];
       if (!rCells || !Array.isArray(rCells)) continue;
 
-      // Skip fully empty rows
       if (rCells.every(c => c === null || c === undefined || String(c).trim() === '')) {
         continue;
       }
 
-      // Check Registration filter
       if (excelRegFilter && regColIdx !== -1) {
         const cellVal = String(rCells[regColIdx] || '').replace(/\s+/g, '').toUpperCase();
         const filterVal = excelRegFilter.replace(/\s+/g, '').toUpperCase();
         if (!cellVal.includes(filterVal)) continue;
       }
 
-      // Check Text search filter
       if (excelSearch) {
         const rowStr = rCells.map(String).join(' ').toLowerCase();
         if (!rowStr.includes(excelSearch.toLowerCase())) continue;
       }
 
       resultRows.push({
-        rowIndex: i + 1, // 1-indexed
+        rowIndex: i + 1,
         cells: rCells,
       });
     }
 
-    // Always ensure the target row is in the filtered list if not already present
     const targetRowIdx = evidence.rowNumber || -1;
     const targetInList = resultRows.some(r => r.rowIndex === targetRowIdx);
     if (!targetInList && targetRowIdx > 0 && excelData.rows[targetRowIdx - 1]) {
-      // Find where it should insert or append
       const targetRowObj = {
         rowIndex: targetRowIdx,
         cells: excelData.rows[targetRowIdx - 1],
@@ -181,15 +206,41 @@ export default function SourceViewerPanel({
     return resultRows;
   };
 
+  const handleCopyReference = () => {
+    let refStr = evidence.sourceFileName || '';
+    if (isPDF) {
+      refStr += ` - Page ${evidence.pageNumber || 1}`;
+    } else {
+      refStr += ` - Sheet: ${evidence.worksheetName || ''}, Row: ${evidence.rowNumber || 1}`;
+    }
+    navigator.clipboard.writeText(refStr).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  const handleJumpToRow = () => {
+    const rNum = parseInt(jumpRow, 10);
+    if (!isNaN(rNum) && excelData) {
+      const rowEl = document.getElementById(`excel-row-${rNum}`);
+      if (rowEl) {
+        rowEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        rowEl.classList.add('ring-2', 'ring-indigo-500');
+        setTimeout(() => rowEl.classList.remove('ring-2', 'ring-indigo-500'), 2000);
+      } else {
+        alert(`Row ${rNum} not found in the filtered view.`);
+      }
+    }
+  };
+
   const filteredExcelRows = getFilteredExcelRows();
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-end bg-gray-900/50 dark:bg-black/60 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-      {/* Viewer Modal Card */}
-      <div className="w-[94%] max-w-[1280px] h-[92vh] bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 shadow-2xl flex flex-col overflow-hidden animate-in slide-in-from-right duration-300">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/50 dark:bg-black/60 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+      <div className="w-[96%] max-w-[1340px] h-[94vh] bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
         
         {/* Header bar */}
-        <div className="px-6 py-4 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between bg-gray-50/50 dark:bg-gray-850/50">
+        <div className="px-6 py-4 border-b border-gray-150 dark:border-gray-800 flex items-center justify-between bg-gray-50/50 dark:bg-gray-850/50">
           <div className="flex items-center gap-3">
             {isPDF ? (
               <div className="p-2 bg-rose-50 dark:bg-rose-950/20 text-rose-500 rounded-lg">
@@ -201,17 +252,24 @@ export default function SourceViewerPanel({
               </div>
             )}
             <div>
-              <h3 className="text-sm font-semibold text-gray-900 dark:text-white">
+              <h3 className="text-sm font-semibold text-gray-900 dark:text-white flex items-center gap-2">
                 {evidence.sourceFileName || 'Source Document Viewer'}
+                <button
+                  onClick={handleCopyReference}
+                  className="p-1 hover:bg-gray-200 dark:hover:bg-gray-800 text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 rounded transition-colors"
+                  title="Copy source reference"
+                >
+                  {copied ? <Check className="w-3.5 h-3.5 text-green-500" /> : <Copy className="w-3.5 h-3.5" />}
+                </button>
               </h3>
               <p className="text-xs text-gray-500">
-                {isPDF ? 'PDF Document Ingest' : `Spreadsheet • Sheet: ${evidence.worksheetName}`}
+                {isPDF ? `AS24/DKV PDF Ingest • Page ${evidence.pageNumber}` : `Spreadsheet • Sheet: ${evidence.worksheetName}`}
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-4">
-            {/* Quick page action/navigation */}
+            {/* Quick transaction navigation */}
             {onPrev && onNext && (
               <div className="flex items-center gap-1 bg-white dark:bg-gray-850 border border-gray-200 dark:border-gray-800 rounded-lg p-0.5">
                 <button
@@ -234,25 +292,47 @@ export default function SourceViewerPanel({
               </div>
             )}
 
-            {/* Zoom controls for PDF */}
+            {/* Advanced PDF zoom/pan controls */}
             {isPDF && (
-              <div className="flex items-center gap-1 bg-white dark:bg-gray-850 border border-gray-200 dark:border-gray-800 rounded-lg p-0.5">
+              <div className="flex items-center gap-1.5 bg-white dark:bg-gray-850 border border-gray-200 dark:border-gray-800 rounded-lg p-0.5">
                 <button
-                  onClick={() => setZoomScale(Math.max(0.8, zoomScale - 0.2))}
+                  onClick={() => pdfRendererRef.current?.zoomOut()}
                   className="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-400 rounded"
                   title="Zoom Out"
                 >
                   <ZoomOut className="w-4 h-4" />
                 </button>
-                <span className="text-[11px] font-mono font-medium text-gray-500 px-2">
+                <span className="text-[11px] font-mono font-medium text-gray-500 px-1.5">
                   {Math.round(zoomScale * 100)}%
                 </span>
                 <button
-                  onClick={() => setZoomScale(Math.min(2.5, zoomScale + 0.2))}
+                  onClick={() => pdfRendererRef.current?.zoomIn()}
                   className="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-400 rounded"
                   title="Zoom In"
                 >
                   <ZoomIn className="w-4 h-4" />
+                </button>
+                <div className="h-4 w-px bg-gray-200 dark:bg-gray-800 mx-1"></div>
+                <button
+                  onClick={() => pdfRendererRef.current?.fitToWidth()}
+                  className="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-400 rounded text-[10px] font-semibold"
+                  title="Fit to Width"
+                >
+                  Width
+                </button>
+                <button
+                  onClick={() => pdfRendererRef.current?.fitToPage()}
+                  className="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-400 rounded text-[10px] font-semibold"
+                  title="Fit to Page"
+                >
+                  Page
+                </button>
+                <button
+                  onClick={() => pdfRendererRef.current?.recenter()}
+                  className="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 text-indigo-500 hover:text-indigo-600 rounded"
+                  title="Recenter Highlight"
+                >
+                  <RotateCcw className="w-4 h-4" />
                 </button>
               </div>
             )}
@@ -275,7 +355,7 @@ export default function SourceViewerPanel({
             {/* Spreadsheet search header */}
             {isExcel && (
               <div className="px-6 py-2.5 bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-850 flex flex-wrap gap-3 items-center">
-                <div className="relative flex-1 max-w-[280px]">
+                <div className="relative flex-1 max-w-[240px]">
                   <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
@@ -285,7 +365,7 @@ export default function SourceViewerPanel({
                     className="w-full text-xs pl-8 pr-3 py-1.5 bg-gray-50 dark:bg-gray-850 border border-gray-200 dark:border-gray-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500"
                   />
                 </div>
-                <div className="relative flex-1 max-w-[200px]">
+                <div className="relative flex-1 max-w-[180px]">
                   <Filter className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
@@ -295,36 +375,45 @@ export default function SourceViewerPanel({
                     className="w-full text-xs pl-8 pr-3 py-1.5 bg-gray-50 dark:bg-gray-850 border border-gray-200 dark:border-gray-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500"
                   />
                 </div>
-                <span className="text-[10px] text-gray-500 select-none">
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="text"
+                    placeholder="Jump to row..."
+                    value={jumpRow}
+                    onChange={(e) => setJumpRow(e.target.value)}
+                    className="w-16 text-xs px-2 py-1.5 bg-gray-50 dark:bg-gray-850 border border-gray-200 dark:border-gray-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                  />
+                  <button
+                    onClick={handleJumpToRow}
+                    className="btn btn-secondary px-2.5 py-1.5 text-xs"
+                  >
+                    Go
+                  </button>
+                </div>
+                <span className="text-[10px] text-gray-500 select-none ml-auto">
                   Showing {filteredExcelRows.length} of {excelData?.rows?.length || 0} rows
                 </span>
               </div>
             )}
 
-            {/* Actual Viewer Canvas / Area */}
-            <div className="flex-1 overflow-auto p-6 flex justify-center items-start">
+            {/* Actual Viewer Area */}
+            <div className="flex-1 overflow-hidden relative w-full h-full">
               {isPDF ? (
-                <div className="bg-white dark:bg-gray-900 p-4 shadow-xl rounded-xl border border-gray-200 dark:border-gray-850 max-w-full">
-                  <div className="flex justify-between items-center mb-2 text-xs text-gray-500">
-                    <span>PDF Page: {evidence.pageNumber}</span>
-                    {evidence.boundingBox && (
-                      <span className="text-indigo-500 flex items-center gap-1 font-semibold">
-                        <Sparkles className="w-3.5 h-3.5" />
-                        Row location highlighted
-                      </span>
-                    )}
-                  </div>
+                <div className="w-full h-full">
                   <PDFPageRenderer
+                    ref={pdfRendererRef}
                     fileId={evidence.sourceFileId}
                     pageNumber={evidence.pageNumber || 1}
                     boundingBox={evidence.boundingBox}
                     crop={false}
-                    scale={zoomScale}
-                    className="border border-gray-250 dark:border-gray-800"
+                    zoomScale={zoomScale}
+                    onZoomChange={setZoomScale}
+                    onLoadComplete={() => {}}
+                    className="w-full h-full"
                   />
                 </div>
               ) : (
-                <div className="w-full h-full bg-white dark:bg-gray-900 shadow-lg rounded-xl border border-gray-200 dark:border-gray-800 flex flex-col overflow-hidden">
+                <div className="w-full h-full bg-white dark:bg-gray-900 flex flex-col overflow-hidden">
                   {loadingExcel && (
                     <div className="flex-1 flex flex-col items-center justify-center gap-3">
                       <div className="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
@@ -334,20 +423,29 @@ export default function SourceViewerPanel({
 
                   {!loadingExcel && excelData && (
                     <div className="flex-1 overflow-auto relative">
-                      <table className="w-full text-left border-collapse text-[11px]">
-                        <thead className="sticky top-0 z-20 bg-gray-50 dark:bg-gray-850 border-b border-gray-200 dark:border-gray-850 shadow-sm">
+                      <table className="w-full text-left border-collapse text-[11px] table-fixed">
+                        <thead className="sticky top-0 z-20 bg-gray-55 dark:bg-gray-850 border-b border-gray-200 dark:border-gray-850 shadow-sm">
                           <tr className="text-gray-600 dark:text-gray-400 font-semibold">
-                            <th className="px-3 py-2 border-r border-gray-200 dark:border-gray-800 text-center w-12 select-none">
+                            {/* Sticky Top-Left Corner for frozen Row col */}
+                            <th className="px-3 py-2 border-r border-gray-200 dark:border-gray-800 text-center w-14 select-none sticky left-0 z-30 bg-gray-100 dark:bg-gray-800">
                               Row
                             </th>
-                            {excelData.headerRow.map((col: string, idx: number) => (
-                              <th
-                                key={idx}
-                                className="px-3 py-2 border-r border-gray-200 dark:border-gray-800 min-w-[120px] font-semibold"
-                              >
-                                {col || `Col ${idx + 1}`}
-                              </th>
-                            ))}
+                            {excelData.headerRow.map((col: string, idx: number) => {
+                              // Freeze the first 2 data columns by setting sticky positions
+                              const isFrozenCol = idx < 2;
+                              const leftOffset = idx === 0 ? '56px' : idx === 1 ? '176px' : undefined;
+                              return (
+                                <th
+                                  key={idx}
+                                  style={isFrozenCol ? { position: 'sticky', left: leftOffset, zIndex: 30 } : undefined}
+                                  className={`px-3 py-2 border-r border-gray-200 dark:border-gray-800 w-[120px] min-w-[120px] font-semibold ${
+                                    isFrozenCol ? 'bg-gray-100 dark:bg-gray-800' : ''
+                                  }`}
+                                >
+                                  {col || `Col ${idx + 1}`}
+                                </th>
+                              );
+                            })}
                           </tr>
                         </thead>
                         <tbody>
@@ -356,23 +454,30 @@ export default function SourceViewerPanel({
                             return (
                               <tr
                                 key={rowIndex}
+                                id={`excel-row-${rowIndex}`}
                                 ref={isTarget ? targetRowRef : null}
-                                className={`border-b border-gray-100 dark:border-gray-850 hover:bg-gray-50/50 dark:hover:bg-gray-800/30 transition-colors ${
+                                className={`border-b border-gray-100 dark:border-gray-850 hover:bg-gray-55/60 dark:hover:bg-gray-800/40 transition-colors ${
                                   isTarget
                                     ? 'bg-amber-50/60 dark:bg-amber-950/20 font-medium ring-2 ring-inset ring-amber-400'
                                     : 'text-gray-700 dark:text-gray-300'
                                 }`}
                               >
-                                <td className="px-3 py-2 border-r border-gray-200 dark:border-gray-800 text-center bg-gray-50/50 dark:bg-gray-850/50 font-bold text-gray-500 select-none">
+                                {/* Sticky Frozen Row column */}
+                                <td className="px-3 py-2 border-r border-gray-200 dark:border-gray-800 text-center bg-gray-50 dark:bg-gray-850 font-bold text-gray-550 select-none sticky left-0 z-10">
                                   {rowIndex}
                                 </td>
                                 {excelData.headerRow.map((header: string, colIdx: number) => {
                                   const cellVal = cells[colIdx];
                                   const hlClass = getCellHighlightClass(header, isTarget);
+                                  const isFrozenCol = colIdx < 2;
+                                  const leftOffset = colIdx === 0 ? '56px' : colIdx === 1 ? '176px' : undefined;
                                   return (
                                     <td
                                       key={colIdx}
-                                      className={`px-3 py-2 border-r border-gray-150 dark:border-gray-800 ${hlClass}`}
+                                      style={isFrozenCol ? { position: 'sticky', left: leftOffset, zIndex: 10 } : undefined}
+                                      className={`px-3 py-2 border-r border-gray-150 dark:border-gray-800 truncate ${
+                                        isFrozenCol ? 'bg-white dark:bg-gray-900' : ''
+                                      } ${hlClass}`}
                                       title={cellVal ? String(cellVal) : ''}
                                     >
                                       {cellVal !== undefined && cellVal !== null ? String(cellVal) : ''}
@@ -395,7 +500,7 @@ export default function SourceViewerPanel({
           <div className="w-[360px] bg-white dark:bg-gray-900 flex flex-col overflow-hidden border-l border-gray-200 dark:border-gray-800">
             
             {/* View Tabs */}
-            <div className="flex border-b border-gray-100 dark:border-gray-800 text-xs">
+            <div className="flex border-b border-gray-150 dark:border-gray-800 text-xs">
               <button
                 onClick={() => setActiveTab('source')}
                 className={`flex-1 py-3 text-center font-medium border-b-2 transition-all ${
@@ -431,10 +536,8 @@ export default function SourceViewerPanel({
             {/* Tab Contents */}
             <div className="flex-1 overflow-y-auto p-5">
               
-              {/* Tab 1: Extraction & Arithmetic */}
               {activeTab === 'source' && (
                 <div className="flex flex-col gap-4">
-                  
                   {/* Status / Confidence Card */}
                   <div className="p-4 bg-gray-50 dark:bg-gray-850 border border-gray-100 dark:border-gray-800 rounded-xl">
                     <div className="flex items-center justify-between mb-2">
@@ -453,9 +556,8 @@ export default function SourceViewerPanel({
                         style={{ width: `${evidence.confidence}%` }}
                       ></div>
                     </div>
-
-                    <div className="flex justify-between items-center text-[10px] text-gray-500">
-                      <span>Parser version: {evidence.parserVersion}</span>
+                    <div className="flex justify-between items-center text-[10px] text-gray-500 font-mono">
+                      <span>Parser: v{evidence.parserVersion}</span>
                       <span>Source: {evidence.sourceType}</span>
                     </div>
                   </div>
@@ -475,14 +577,13 @@ export default function SourceViewerPanel({
                     </div>
                   )}
 
-                  {/* Arithmetic details for PDF and Period Invoice Excel */}
+                  {/* Arithmetic validation */}
                   {isPDF && transaction && (
                     <div className="p-4 bg-indigo-50/35 dark:bg-indigo-950/10 border border-indigo-100/60 dark:border-indigo-900/30 rounded-xl">
                       <span className="text-[11px] font-semibold text-indigo-700 dark:text-indigo-400 block mb-2">
                         Financial Arithmetic Validation
                       </span>
-                      
-                      <div className="flex flex-col gap-1.5 font-mono text-[10px] text-gray-600 dark:text-gray-400">
+                      <div className="flex flex-col gap-1.5 font-mono text-[10px] text-gray-650 dark:text-gray-400">
                         <div className="flex justify-between py-0.5 border-b border-gray-150/40 dark:border-gray-850">
                           <span>Base net amount:</span>
                           <span className="text-gray-800 dark:text-gray-200">€{parseFloat(transaction.baseValueNet || '0').toFixed(2)}</span>
@@ -493,22 +594,19 @@ export default function SourceViewerPanel({
                         </div>
                         <div className="flex justify-between py-0.5 border-b border-gray-150/40 dark:border-gray-850">
                           <span>Discount net:</span>
-                          <span className={`${parseFloat(transaction.discountNet || '0') <= 0 ? 'text-green-600 dark:text-green-400' : 'text-gray-800 dark:text-gray-200'}`}>
+                          <span className={`${parseFloat(transaction.discountNet || '0') <= 0 ? 'text-green-600 dark:text-green-400' : 'text-gray-805'}`}>
                             {parseFloat(transaction.discountNet || '0') <= 0 ? '-' : '+'} €{Math.abs(parseFloat(transaction.discountNet || '0')).toFixed(2)}
                           </span>
                         </div>
-                        
                         <div className="flex justify-between py-1 border-b-2 border-dashed border-gray-200 dark:border-gray-800 text-gray-800 dark:text-white font-semibold">
                           <span>Total net:</span>
                           <span>€{parseFloat(transaction.valueOfPurchaseNet || '0').toFixed(2)}</span>
                         </div>
-                        
                         <div className="flex justify-between py-0.5 border-b border-gray-150/40 dark:border-gray-850">
                           <span>VAT amount:</span>
-                          <span className="text-gray-800 dark:text-gray-200">+ €{parseFloat(transaction.vat || '0').toFixed(2)}</span>
+                          <span className="text-gray-850 dark:text-gray-250">+ €{parseFloat(transaction.vat || '0').toFixed(2)}</span>
                         </div>
-                        
-                        <div className="flex justify-between py-1 bg-indigo-50 dark:bg-indigo-950/20 px-1.5 rounded text-gray-800 dark:text-white font-bold">
+                        <div className="flex justify-between py-1 bg-indigo-50 dark:bg-indigo-950/20 px-1.5 rounded text-gray-850 dark:text-white font-bold">
                           <span>Total gross:</span>
                           <span>€{parseFloat(transaction.valueInPayCurrency || '0').toFixed(2)}</span>
                         </div>
@@ -516,7 +614,7 @@ export default function SourceViewerPanel({
                     </div>
                   )}
 
-                  {/* Raw extracted fields list */}
+                  {/* Raw extracted fields */}
                   <div className="flex flex-col gap-2.5">
                     <span className="text-xs font-semibold text-gray-700 dark:text-gray-300">
                       Raw Extracted Values
@@ -538,17 +636,14 @@ export default function SourceViewerPanel({
                         ))}
                     </div>
                   </div>
-
                 </div>
               )}
 
-              {/* Tab 2: Normalised Fields */}
               {activeTab === 'parsed' && transaction && (
                 <div className="flex flex-col gap-3">
                   <span className="text-xs font-semibold text-gray-700 dark:text-gray-300">
                     Normalised Canonical Transaction
                   </span>
-                  
                   <div className="flex flex-col border border-gray-100 dark:border-gray-800 rounded-xl overflow-hidden font-mono text-[10px]">
                     {[
                       { label: 'Vehicle Registration', val: transaction.registration || transaction.vehicleRegistration },
@@ -572,7 +667,7 @@ export default function SourceViewerPanel({
                         key={label}
                         className="flex justify-between px-3 py-2 border-b border-gray-100 dark:border-gray-850 bg-gray-50/20 dark:bg-gray-900"
                       >
-                        <span className="text-gray-500 select-none">{label}:</span>
+                        <span className="text-gray-505 select-none">{label}:</span>
                         <span className="text-gray-900 dark:text-gray-200 font-semibold truncate max-w-[160px]" title={val}>
                           {val || '--'}
                         </span>
@@ -582,16 +677,12 @@ export default function SourceViewerPanel({
                 </div>
               )}
 
-              {/* Tab 3: Correction History */}
               {activeTab === 'history' && (
                 <div className="flex flex-col gap-4 text-xs">
                   <span className="text-xs font-semibold text-gray-700 dark:text-gray-300">
                     Audit Log & Correction History
                   </span>
-                  
                   <div className="relative border-l border-gray-250 dark:border-gray-800 ml-3 pl-5 flex flex-col gap-4 py-2">
-                    
-                    {/* Event 1 */}
                     <div className="relative">
                       <div className="absolute -left-[27px] top-1 p-0.5 bg-green-500 rounded-full text-white">
                         <CheckCircle2 className="w-3 h-3" />
@@ -604,8 +695,6 @@ export default function SourceViewerPanel({
                         </p>
                       </div>
                     </div>
-
-                    {/* Event 2 */}
                     <div className="relative">
                       <div className="absolute -left-[27px] top-1 p-0.5 bg-indigo-500 rounded-full text-white">
                         <History className="w-3 h-3" />
@@ -621,11 +710,10 @@ export default function SourceViewerPanel({
                   </div>
                 </div>
               )}
-
             </div>
 
-            {/* Proceed Actions at bottom */}
-            <div className="p-5 border-t border-gray-150 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/60 flex flex-col gap-2">
+            {/* Actions bottom */}
+            <div className="p-5 border-t border-gray-150 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/65 flex flex-col gap-2">
               <div className="flex justify-between items-center text-[10px] text-gray-500 mb-1">
                 <span>Central registry status:</span>
                 <span className="text-green-500 font-semibold">Active Fleet Member</span>
@@ -637,11 +725,8 @@ export default function SourceViewerPanel({
                 Close Viewer
               </button>
             </div>
-
           </div>
-
         </div>
-
       </div>
     </div>
   );

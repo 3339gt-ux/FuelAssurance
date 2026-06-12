@@ -21,6 +21,41 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
   }
 }
 
+export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
+  try {
+    const { id } = params;
+    const body = await req.json();
+
+    const batch = db.find('transaction_batches', (b: any) => b.id === id);
+    if (!batch) {
+      return NextResponse.json({ error: 'Batch not found' }, { status: 404 });
+    }
+
+    const updatedData: any = {};
+    if (body.approvalStatus !== undefined) updatedData.approvalStatus = body.approvalStatus;
+    if (body.status !== undefined) updatedData.status = body.status;
+    if (body.reviewerNotes !== undefined) updatedData.reviewerNotes = body.reviewerNotes;
+    if (body.approvalNotes !== undefined) updatedData.approvalNotes = body.approvalNotes;
+    
+    if (body.auditEvent) {
+      updatedData.auditHistory = [
+        ...(batch.auditHistory || []),
+        {
+          id: Math.random().toString(36).substring(2, 9),
+          timestamp: new Date().toISOString(),
+          user: 'Graham Auditor',
+          ...body.auditEvent,
+        }
+      ];
+    }
+
+    const updated = db.update('transaction_batches', id, updatedData);
+    return NextResponse.json({ success: true, batch: updated });
+  } catch (err: any) {
+    return NextResponse.json({ error: err.message }, { status: 500 });
+  }
+}
+
 export async function DELETE(req: NextRequest, { params }: { params: { id: string } }) {
   try {
     const { id } = params;
