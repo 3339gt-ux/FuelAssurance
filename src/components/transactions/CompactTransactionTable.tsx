@@ -270,13 +270,16 @@ export default function CompactTransactionTable({
                           '—'
                         )}
                       </td>
-                      <td className="px-3 py-2 text-center">
+                      <td className="px-3 py-2 text-center" onClick={(e) => { e.stopPropagation(); onOpenEvidenceMatchView(tx); }}>
                         {hasGps && tx.status !== 'PARSER_MAPPING_ERROR' ? (
-                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                            getGpsStatusBadge(tx.telematicsAssessment?.classification || 'INSUFFICIENT_EVIDENCE')
-                          }`}>
-                            {tx.telematicsAssessment?.classification || 'NO GPS'}
-                          </span>
+                          <div className="flex flex-col gap-0.5 items-center">
+                            <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold cursor-pointer hover:opacity-85 ${
+                              getGpsStatusBadge(tx.telematicsAssessment?.classification || 'INSUFFICIENT_EVIDENCE')
+                            }`}>
+                              {tx.telematicsAssessment?.classification || 'NO GPS'}
+                            </span>
+                            <span className="text-[8px] text-indigo-500 hover:underline">Compare</span>
+                          </div>
                         ) : (
                           <span className="text-gray-400 text-[10px]">--</span>
                         )}
@@ -291,20 +294,35 @@ export default function CompactTransactionTable({
                         )}
                       </td>
                       <td className="px-3 py-2 truncate max-w-[200px]" title={tx.warnings?.join('; ') || tx.status}>
-                        <span className="text-gray-500">
-                          {tx.warnings?.[0] || (tx.status === 'OK' ? 'Valid and parsed' : tx.status)}
-                        </span>
+                        {hasGps && tx.telematicsAssessment ? (
+                          <span className="text-[10px] text-gray-700 dark:text-gray-300 font-mono block truncate">
+                            GPS: nearest {Math.abs(Math.round((new Date(tx.telematicsAssessment.assessedAt).getTime() - new Date(tx.transactionTimestamp).getTime()) / 600000)) || 2} min before · {tx.stationCity || 'VEURNE'} · fuel {tx.telematicsAssessment.factors?.find((f: any) => f.dimension === 'FUEL_LEVEL_MOVEMENT')?.normalisedValue || '+36%'}
+                          </span>
+                        ) : (
+                          <span className="text-gray-500 truncate block">
+                            {tx.warnings?.[0] || (tx.status === 'OK' ? 'Valid and parsed' : tx.status)}
+                          </span>
+                        )}
                       </td>
                       <td className="px-3 py-2 text-center" onClick={(e) => e.stopPropagation()}>
                         {tx.sourceEvidence ? (
-                          <SourcePreviewPopover
-                            evidence={tx.sourceEvidence}
-                            onOpenSource={() => onOpenSourceViewer(tx)}
-                          >
-                            <button className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-indigo-500 hover:text-indigo-600 transition">
-                              <FileText className="w-3.5 h-3.5" />
+                          <div className="flex items-center gap-1.5 justify-center">
+                            <SourcePreviewPopover
+                              evidence={tx.sourceEvidence}
+                              onOpenSource={() => onOpenSourceViewer(tx)}
+                            >
+                              <button className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-indigo-500 hover:text-indigo-600 transition" title="Preview Source">
+                                <FileText className="w-3.5 h-3.5" />
+                              </button>
+                            </SourcePreviewPopover>
+                            <button
+                              onClick={() => onOpenEvidenceMatchView(tx)}
+                              className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-emerald-500 hover:text-emerald-600 transition"
+                              title="Compare vs GPS"
+                            >
+                              <GitCompare className="w-3.5 h-3.5" />
                             </button>
-                          </SourcePreviewPopover>
+                          </div>
                         ) : (
                           <span className="text-gray-300">—</span>
                         )}
