@@ -1,5 +1,5 @@
 'use client';
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useDropzone } from 'react-dropzone';
 import {
@@ -28,19 +28,35 @@ import {
   GitCompare,
   Download,
   Check,
+  Undo,
+  Calendar,
+  MapPin,
+  Flame,
+  Search,
+  Settings2,
+  Activity,
+  UserCheck,
+  PenTool
 } from 'lucide-react';
 import CompactTransactionTable from '@/components/transactions/CompactTransactionTable';
 import SourceViewerPanel from '@/components/source-preview/SourceViewerPanel';
 import EvidenceMatchView from '@/components/source-preview/EvidenceMatchView';
+import PDFPageRenderer from '@/components/source-preview/PDFPageRenderer';
+import { normalizeRegistration } from '@/config/fleet-registry';
 
-interface VehicleStatus {
-  registration: string;
-  chargeCount: number;
-  gpsAttached?: boolean;
-  gpsFileName?: string;
-  gpsStatus?: string;
-  checkStatus?: string;
-  checkResults?: any;
+interface GPSAttachment {
+  fileName: string;
+  fileHash: string;
+  vehicleRegistration: string;
+  uploadedAt: string;
+  coverageStart: string;
+  coverageEnd: string;
+  gpsRecordCount?: number;
+  fuelLevelMin?: number;
+  fuelLevelMax?: number;
+  odometerMin?: number;
+  odometerMax?: number;
+  warnings?: string[];
 }
 
 interface BatchRecord {
@@ -50,13 +66,7 @@ interface BatchRecord {
   uploadDate: string;
   vehicles: string[];
   vehicleStatuses?: Record<string, string>;
-  attachedGpsFiles?: Array<{
-    vehicleRegistration: string;
-    fileName: string;
-    coverageStart: string;
-    coverageEnd: string;
-    uploadedAt: string;
-  }>;
+  attachedGpsFiles?: GPSAttachment[];
   checkResults?: Record<string, any>;
   chargeSummary?: {
     totalChargesCount: number;
@@ -83,76 +93,22 @@ interface BatchRecord {
   }>;
 }
 
-function GpsDropZone({ batchId, vehicleReg, onDone }: { batchId: string; vehicleReg: string; onDone: () => void }) {
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-
-  const onDrop = useCallback(async (files: File[]) => {
-    const file = files[0];
-    if (!file) return;
-    setLoading(true);
-    setError('');
-    const formData = new FormData();
-    formData.append('file', file);
-    try {
-      const res = await fetch(`/api/batches/${batchId}/upload-gps`, { method: 'POST', body: formData });
-      const data = await res.json();
-      if (data.success) {
-        onDone();
-      } else {
-        setError(data.errors?.[0] || data.error || 'GPS upload failed');
-      }
-    } catch {
-      setError('Upload request failed');
-    } finally {
-      setLoading(false);
-    }
-  }, [batchId, onDone]);
-
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    accept: {
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
-      'application/vnd.ms-excel': ['.xls'],
-    },
-    multiple: false,
-    onDrop,
-  });
-
-  if (loading) {
-    return (
-      <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-indigo-50 dark:bg-indigo-950/20 border border-indigo-200 text-[11px] text-indigo-700 dark:text-indigo-400">
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        <span>Saving GPS...</span>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-1">
-      <div
-        {...getRootProps()}
-        className={`flex items-center gap-1.5 px-3 py-1 rounded-lg border-2 border-dashed cursor-pointer transition text-[11px] ${
-          isDragActive
-            ? 'border-indigo-400 bg-indigo-50/10 text-indigo-700'
-            : 'border-gray-250 dark:border-gray-800 hover:border-indigo-400 hover:bg-indigo-50/10 text-gray-500'
-        }`}
-      >
-        <input {...getInputProps()} />
-        <Upload className="h-3 w-3 shrink-0" />
-        <span>Attach GPS</span>
-      </div>
-      {error && <p className="text-[10px] text-rose-600 font-medium">{error}</p>}
-    </div>
-  );
+interface FailedImport {
+  id: string;
+  fileName: string;
+  errorReason: string;
+  technicalDetails?: string;
+  timestamp: string;
+  provider: string;
 }
 
 function BatchesPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const batchIdParam = searchParams.get('id');
-  const tabParam = searchParams.get('tab');
-
+  
   const [batches, setBatches] = useState<BatchRecord[]>([]);
+  const [failedImports, setFailedImports] = useState<FailedImport[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   
@@ -161,13 +117,25 @@ function BatchesPageContent() {
   const [activeBatch, setActiveBatch] = useState<BatchRecord | null>(null);
   const [transactions, setTransactions] = useState<any[]>([]);
   const [loadingBatchData, setLoadingBatchData] = useState(false);
-  const [activeTab, setActiveTab] = useState<'overview' | 'vehicles' | 'transactions' | 'exceptions' | 'gps' | 'source' | 'reports' | 'approval'>('overview');
-  const [selectedVehicle, setSelectedVehicle] = useState<string | null>(null);
   
-  // Global density setting
+  // Stepper workflow step: 1 (Upload) | 2 (Review Extracted) | 3 (Upload GPS) | 4 (Compare) | 5 (Approve/Flag)
+  const [activeStep, setActiveStep] = useState<number>(1);
+  const [selectedTransaction, setSelectedTransaction] = useState<any | null>(null);
+  const [selectedTxEvidence, setSelectedTxEvidence] = useState<any>(null);
+  const [loadingEvidence, setLoadingEvidence] = useState(false);
+  const [timeWindowMinutes, setTimeWindowMinutes] = useState<number>(30);
+  const [gpsSearch, setGpsSearch] = useState('');
+  const [recomputingRowId, setRecomputingRowId] = useState<string | null>(null);
+  
+  // Edit dialog state
+  const [editingTransaction, setEditingTransaction] = useState<any | null>(null);
+  const [editForm, setEditForm] = useState<any>({});
+  
+  // Global modes
   const [density, setDensity] = useState<'compact' | 'comfortable'>('compact');
+  const [advancedMode, setAdvancedMode] = useState<boolean>(false);
 
-  // Preview panel states
+  // Modals for E2E tests
   const [selectedTxForSource, setSelectedTxForSource] = useState<any | null>(null);
   const [selectedTxForMatch, setSelectedTxForMatch] = useState<any | null>(null);
 
@@ -177,37 +145,10 @@ function BatchesPageContent() {
     setDensity(mode);
     document.documentElement.classList.add(`density-${mode}`);
     document.documentElement.classList.remove(`density-${mode === 'compact' ? 'comfortable' : 'compact'}`);
+
+    const adv = localStorage.getItem('fuel-assurance-advanced-mode') === 'true';
+    setAdvancedMode(adv);
   }, []);
-
-  // Sync review state to localStorage
-  useEffect(() => {
-    if (!selectedBatchId) return;
-    const state = {
-      batchId: selectedBatchId,
-      currentTab: activeTab,
-      selectedVehicle,
-      densityMode: density,
-      lastUpdatedAt: new Date().toISOString(),
-    };
-    localStorage.setItem(`fuel_review_state_${selectedBatchId}`, JSON.stringify(state));
-    localStorage.setItem('fuel_last_active_batch_id', selectedBatchId);
-  }, [selectedBatchId, activeTab, selectedVehicle, density]);
-
-  // Load state from localStorage on load
-  useEffect(() => {
-    if (!selectedBatchId) return;
-    const cached = localStorage.getItem(`fuel_review_state_${selectedBatchId}`);
-    if (cached) {
-      try {
-        const state = JSON.parse(cached);
-        if (state.currentTab) setActiveTab(state.currentTab as any);
-        if (state.selectedVehicle) setSelectedVehicle(state.selectedVehicle);
-        if (state.densityMode) setDensity(state.densityMode);
-      } catch (e) {
-        console.error('Error loading persistent review state:', e);
-      }
-    }
-  }, [selectedBatchId]);
 
   const toggleDensity = () => {
     const newMode = density === 'compact' ? 'comfortable' : 'compact';
@@ -217,6 +158,13 @@ function BatchesPageContent() {
     document.documentElement.classList.remove(`density-${density}`);
   };
 
+  const toggleAdvancedMode = () => {
+    const next = !advancedMode;
+    setAdvancedMode(next);
+    localStorage.setItem('fuel-assurance-advanced-mode', String(next));
+  };
+
+  // Fetch batches & failed imports
   const fetchBatches = useCallback(async () => {
     setLoading(true);
     setError('');
@@ -224,8 +172,14 @@ function BatchesPageContent() {
       const res = await fetch('/api/batches');
       const data = await res.json();
       setBatches(data.batches || []);
+      
+      // Load failed imports from localStorage
+      const cachedFailed = localStorage.getItem('fuel_assurance_failed_imports');
+      if (cachedFailed) {
+        setFailedImports(JSON.parse(cachedFailed));
+      }
     } catch {
-      setError('Could not load batches');
+      setError('Could not load batches catalog');
     } finally {
       setLoading(false);
     }
@@ -242,7 +196,6 @@ function BatchesPageContent() {
       const res = await fetch(`/api/batches/${id}`);
       const data = await res.json();
       if (data.batch) {
-        // Map raw record properties
         const mappedBatch: BatchRecord = {
           ...data.batch,
           id: data.batch.id || data.batch.batchId,
@@ -255,7 +208,7 @@ function BatchesPageContent() {
         };
         setActiveBatch(mappedBatch);
         
-        // Enrich transactions with GPS match classifications from verificationResults
+        // Enrich transactions
         const enrichedTxs = (data.transactions || []).map((tx: any) => {
           const reg = (tx.registration || tx.vehicleRegistration || '').replace(/\s+/g, '').toUpperCase();
           const vResult = mappedBatch.checkResults?.[reg];
@@ -272,6 +225,7 @@ function BatchesPageContent() {
             telematicsAssessment = {
               classification,
               totalScore: txResult.confidence,
+              assessedAt: mappedBatch.uploadDate,
               factors: txResult.factors?.map((f: any) => ({
                 dimension: f.factorName?.replace(/\s+/g, '_')?.toUpperCase(),
                 maxPoints: f.maxPoints,
@@ -291,66 +245,246 @@ function BatchesPageContent() {
           };
         });
         setTransactions(enrichedTxs);
+
+        // Keep selected transaction reference updated
+        if (selectedTransaction) {
+          const updatedTx = enrichedTxs.find((t: any) => t.id === selectedTransaction.id);
+          if (updatedTx) setSelectedTransaction(updatedTx);
+        }
       }
     } catch (err) {
       console.error('Failed to load batch data:', err);
     } finally {
       setLoadingBatchData(false);
     }
-  }, []);
+  }, [selectedTransaction]);
 
   // Synchronize workspace selection state with query parameters
   useEffect(() => {
     if (batchIdParam) {
       setSelectedBatchId(batchIdParam);
       fetchBatchDetails(batchIdParam);
-      if (tabParam && ['overview', 'vehicles', 'transactions', 'exceptions', 'gps', 'source', 'reports', 'approval'].includes(tabParam)) {
-        setActiveTab(tabParam as any);
-      } else {
-        setActiveTab('overview');
-      }
+      // Auto transition to Step 2 when batch loaded
+      setActiveStep((s) => (s === 1 ? 2 : s));
     } else {
       setSelectedBatchId(null);
       setActiveBatch(null);
       setTransactions([]);
+      setSelectedTransaction(null);
+      setActiveStep(1);
     }
-  }, [batchIdParam, tabParam, fetchBatchDetails]);
+  }, [batchIdParam]);
 
-  const handleOpenWorkspace = (id: string) => {
-    router.push(`/batches?id=${id}`);
-  };
+  // Fetch telemetry evidence for selected transaction in Step 4
+  useEffect(() => {
+    if (activeStep !== 4 || !selectedTransaction) {
+      setSelectedTxEvidence(null);
+      return;
+    }
+    
+    let active = true;
+    setLoadingEvidence(true);
+    
+    fetch(`/api/telematics/evidence?transactionId=${selectedTransaction.id}&windowMinutes=${timeWindowMinutes}`)
+      .then((res) => res.json())
+      .then((result) => {
+        if (!active) return;
+        if (result.success) {
+          setSelectedTxEvidence(result);
+        } else {
+          console.error(result.error);
+        }
+        setLoadingEvidence(false);
+      })
+      .catch((err) => {
+        console.error(err);
+        if (active) setLoadingEvidence(false);
+      });
+      
+    return () => { active = false; };
+  }, [selectedTransaction, activeStep, timeWindowMinutes]);
 
-  const handleCloseWorkspace = () => {
-    router.push('/batches');
-    fetchBatches();
-  };
-
-  const handleDeleteBatch = async (id: string) => {
-    if (!confirm('Delete this batch and all associated records?')) return;
+  // Handle invoice file drops in Step 1
+  const onDropInvoice = useCallback(async (files: File[]) => {
+    const file = files[0];
+    if (!file) return;
+    setLoading(true);
+    setError('');
+    const formData = new FormData();
+    formData.append('file', file);
     try {
-      await fetch(`/api/batches/${id}`, { method: 'DELETE' });
-      fetchBatches();
-    } catch (err) {
-      console.error(err);
+      const res = await fetch('/api/upload', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (data.success && data.fileId) {
+        router.push(`/batches?id=${data.fileId}`);
+      } else {
+        // Parse failure
+        const failed: FailedImport = {
+          id: Math.random().toString(),
+          fileName: file.name,
+          errorReason: data.message || 'The file could not be mapped to a supported structure.',
+          technicalDetails: data.technicalDetails || 'Coordinates or columns matching failed.',
+          timestamp: new Date().toISOString(),
+          provider: file.name.toLowerCase().includes('as24') ? 'AS24' : 'DKV'
+        };
+        const updatedFailed = [failed, ...failedImports];
+        setFailedImports(updatedFailed);
+        localStorage.setItem('fuel_assurance_failed_imports', JSON.stringify(updatedFailed));
+        setError(failed.errorReason);
+      }
+    } catch (err: any) {
+      setError('Connection to parsing server failed.');
+    } finally {
+      setLoading(false);
+    }
+  }, [failedImports, router]);
+
+  const { getRootProps: getInvoiceProps, getInputProps: getInvoiceInput, isDragActive: invoiceDrag } = useDropzone({
+    accept: {
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+      'application/vnd.ms-excel': ['.xls'],
+      'application/pdf': ['.pdf'],
+    },
+    multiple: false,
+    onDrop: onDropInvoice,
+  });
+
+  // Handle multiple GPS files drop in Step 3
+  const onDropGps = useCallback(async (files: File[]) => {
+    if (!activeBatch) return;
+    setLoadingBatchData(true);
+    const formData = new FormData();
+    for (const file of files) {
+      formData.append('file', file);
+    }
+    try {
+      const res = await fetch(`/api/batches/${activeBatch.id}/upload-gps`, {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await res.json();
+      if (data.success) {
+        await fetchBatchDetails(activeBatch.id);
+      } else {
+        alert(data.error || 'GPS upload failed.');
+      }
+    } catch {
+      alert('Failed to connect to GPS upload API.');
+    } finally {
+      setLoadingBatchData(false);
+    }
+  }, [activeBatch, fetchBatchDetails]);
+
+  const { getRootProps: getGpsProps, getInputProps: getGpsInput, isDragActive: gpsDrag } = useDropzone({
+    accept: {
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+      'application/vnd.ms-excel': ['.xls'],
+    },
+    multiple: true,
+    onDrop: onDropGps,
+  });
+
+  // Transaction manual edits saving
+  const handleOpenEdit = (tx: any) => {
+    setEditingTransaction(tx);
+    setEditForm({
+      registration: tx.registration || tx.vehicleRegistration || '',
+      transactionDate: tx.transactionDate || '',
+      transactionTimestamp: tx.transactionTimestamp || tx.transactionDateTime || '',
+      productName: tx.productName || '',
+      productType: tx.productType || '',
+      stationCity: tx.stationCity || '',
+      stationName: tx.stationName || '',
+      quantity: tx.quantity || tx.volume || '',
+      unit: tx.unit || tx.volumeUnit || 'L',
+      baseValueNet: tx.baseValueNet || tx.valueOfPurchaseNet || tx.paymentAmountExVat || '',
+      discountNet: tx.discountNet || tx.rebate || '',
+      serviceFeeNet: tx.serviceFeeNet || '',
+      vat: tx.vat || '',
+      valueInPayCurrency: tx.valueInPayCurrency || tx.paymentAmountInclVat || tx.baseValueGross || tx.amountGross || '',
+      paymentCurrency: tx.paymentCurrency || 'EUR',
+      transactionNumber: tx.transactionNumber || tx.ticketNumber || '',
+      reviewerNote: tx.reviewerNote || '',
+    });
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editingTransaction) return;
+    setRecomputingRowId(editingTransaction.id);
+    try {
+      const res = await fetch(`/api/transactions/${editingTransaction.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(editForm),
+      });
+      const data = await res.json();
+      if (data.success) {
+        await fetchBatchDetails(activeBatch!.id);
+        setEditingTransaction(null);
+      } else {
+        alert(data.error || 'Failed to save edits.');
+      }
+    } catch {
+      alert('Save request failed.');
+    } finally {
+      setRecomputingRowId(null);
     }
   };
 
+  const handleRevertRow = async (txId: string) => {
+    setRecomputingRowId(txId);
+    try {
+      const res = await fetch(`/api/transactions/${txId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ revert: true }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        await fetchBatchDetails(activeBatch!.id);
+        if (editingTransaction && editingTransaction.id === txId) {
+          setEditingTransaction(null);
+        }
+      }
+    } catch {
+      alert('Revert request failed.');
+    } finally {
+      setRecomputingRowId(null);
+    }
+  };
+
+  const handleRowOverride = async (txId: string, status: string, note: string) => {
+    try {
+      const res = await fetch(`/api/transactions/${txId}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ telematicsOverrideStatus: status, reviewerNote: note }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        await fetchBatchDetails(activeBatch!.id);
+      }
+    } catch {
+      alert('Status override request failed.');
+    }
+  };
+
+  // Stepper validation checkers
   const getUnresolvedBlockingIssuesCount = () => {
-    // 1. Transactions with non-OK status or poor GPS match that aren't verified/likely
     const unsupportedCount = transactions.filter(t => 
       t.status !== 'OK' && t.status !== 'Validated' && t.status !== 'VALIDATED' &&
-      t.telematicsAssessment?.classification !== 'VERIFIED' && t.telematicsAssessment?.classification !== 'LIKELY'
+      t.telematicsAssessment?.classification !== 'VERIFIED' && t.telematicsAssessment?.classification !== 'LIKELY' &&
+      t.telematicsOverrideStatus !== 'Marked Supported' && t.telematicsOverrideStatus !== 'Manually Approved'
     ).length;
     
-    // 2. Vehicles without GPS attached
     const vehiclesWithoutGps = activeBatch?.vehicles.filter(reg => 
-      !activeBatch.attachedGpsFiles?.some(a => a.vehicleRegistration === reg)
+      !activeBatch.attachedGpsFiles?.some(a => normalizeRegistration(a.vehicleRegistration) === normalizeRegistration(reg))
     ).length || 0;
     
     return unsupportedCount + vehiclesWithoutGps;
   };
 
-  const updateApprovalStatus = async (status: string, noteText?: string, notesType: 'reviewer' | 'approval' = 'reviewer') => {
+  const updateApprovalStatus = async (status: string, noteText?: string) => {
     if (!activeBatch) return;
     try {
       const payload: any = {
@@ -360,14 +494,9 @@ function BatchesPageContent() {
           details: `Approval workflow state transitioned to ${status.replace(/_/g, ' ').toUpperCase()}`,
         }
       };
-      if (noteText !== undefined) {
-        if (notesType === 'reviewer') {
-          payload.reviewerNotes = noteText;
-        } else {
-          payload.approvalNotes = noteText;
-        }
+      if (noteText) {
+        payload.reviewerNotes = noteText;
       }
-      
       const res = await fetch(`/api/batches/${activeBatch.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -384,68 +513,25 @@ function BatchesPageContent() {
 
   const handleConfirmBatch = async () => {
     if (!activeBatch) return;
-    try {
-      // confirm batch simply updates db state or sets verified status
-      const res = await fetch(`/api/review-queue/resolve-batch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ batchId: activeBatch.id }),
-      });
-      await updateApprovalStatus('verification_complete', 'Batch verification confirmed and verified.');
-      alert('Batch verification complete! Extracted invoice data signed off.');
-      fetchBatchDetails(activeBatch.id);
-    } catch (err) {
-      alert('Failed to sign off batch');
-    }
+    await updateApprovalStatus('verification_complete', 'Batch verification confirmed and verified.');
+    alert('Verification signed off! Extracted invoice data confirmed.');
   };
 
-  // Bulk GPS Upload inside Workspace
-  const handleBulkGpsUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!activeBatch || !e.target.files) return;
-    const files = Array.from(e.target.files);
-    if (files.length === 0) return;
-
-    setLoadingBatchData(true);
-    const formData = new FormData();
-    for (const file of files) {
-      formData.append('file', file);
-    }
-
-    try {
-      const res = await fetch(`/api/batches/${activeBatch.id}/upload-gps`, {
-        method: 'POST',
-        body: formData,
-      });
-      const data = await res.json();
-      if (data.success) {
-        alert(`Successfully processed ${data.processedCount} GPS files!`);
-      }
-      if (data.errors && data.errors.length > 0) {
-        alert(`Warnings:\n${data.errors.join('\n')}`);
-      }
-      fetchBatchDetails(activeBatch.id);
-    } catch {
-      alert('Upload failed');
-    } finally {
-      setLoadingBatchData(false);
-    }
-  };
-
-  // Export CSV
   const handleExportCSV = () => {
     if (!transactions.length) return;
-    const headers = ['ID', 'Date/Time', 'Vehicle', 'Product', 'Qty', 'Net', 'VAT/Gross', 'GPS Status', 'Confidence', 'Warnings'];
+    const headers = ['ID', 'Date/Time', 'Vehicle', 'Product', 'Qty', 'Net', 'VAT/Gross', 'GPS Status', 'Confidence', 'Manually Edited', 'Override Status'];
     const rows = transactions.map(t => [
       t.id,
       t.transactionTimestamp || t.transactionDateTime || '',
       t.registration || t.vehicleRegistration || '',
       t.productName || t.productType || '',
-      t.quantity || t.volume || '0',
-      t.paymentAmountExVat || t.baseValueNet || '0',
-      t.paymentAmountInclVat || t.valueInPayCurrency || '0',
+      parseFloat(t.quantity || t.volume || '0').toFixed(2),
+      parseFloat(t.paymentAmountExVat || t.baseValueNet || '0').toFixed(2),
+      parseFloat(t.paymentAmountInclVat || t.valueInPayCurrency || '0').toFixed(2),
       t.telematicsAssessment?.classification || 'NO GPS',
       t.extractionConfidence || '100',
-      t.warnings?.join('; ') || '',
+      t.isManuallyEdited ? 'Yes' : 'No',
+      t.telematicsOverrideStatus || 'None'
     ]);
 
     const csvContent = [headers.join(','), ...rows.map(e => e.map(val => `"${String(val).replace(/"/g, '""')}"`).join(','))].join('\n');
@@ -453,815 +539,975 @@ function BatchesPageContent() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.setAttribute('href', url);
-    link.setAttribute('download', `Batch_${activeBatch?.filename || 'export'}_Report.csv`);
+    link.setAttribute('download', `FuelAssurance_Batch_${activeBatch?.filename || 'export'}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
   };
 
-  // Previous/Next Transaction Helpers for panels
-  const navigateTx = (direction: 'next' | 'prev', currentTxId: string, setTx: (tx: any) => void) => {
-    const idx = transactions.findIndex(t => t.id === currentTxId);
-    if (idx === -1) return;
-    let nextIdx = direction === 'next' ? idx + 1 : idx - 1;
-    if (nextIdx >= 0 && nextIdx < transactions.length) {
-      setTx(transactions[nextIdx]);
-    }
+  // Helper values for currency sums
+  const formatExVatSum = (batch: BatchRecord) => {
+    if (!batch.chargeSummary?.totalAmountExVatByCurrency) return '—';
+    return Object.entries(batch.chargeSummary.totalAmountExVatByCurrency)
+      .map(([curr, val]) => `${curr} ${parseFloat(val as any).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`)
+      .join(' / ');
   };
 
   return (
-    <div className="max-w-[1400px] mx-auto py-6 px-4 space-y-6 text-gray-800 dark:text-gray-200 animate-fade-in">
+    <div className="max-w-[1600px] mx-auto py-4 px-4 space-y-4 text-slate-800 dark:text-slate-200 animate-fade-in">
       
-      {/* Dynamic View Selector: List View vs Workspace Review */}
-      {!selectedBatchId ? (
-        // ─── LIST VIEW: BATCH OVERVIEW ───
-        <div className="space-y-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <h1 className="text-2xl font-black text-gray-900 dark:text-white tracking-tight flex items-center gap-2">
-                <Layers className="h-6 w-6 text-indigo-600 dark:text-indigo-400" />
-                Transaction Batches
-              </h1>
-              <p className="text-xs text-gray-500 mt-1">
-                Ingested invoices, transaction sheets, and verification workspaces.
-              </p>
-            </div>
-            <div className="flex items-center gap-3">
-              <button
-                onClick={toggleDensity}
-                className="btn btn-secondary py-1.5 px-3 text-xs flex items-center gap-1.5"
-              >
-                <Settings className="w-3.5 h-3.5" />
-                Mode: {density === 'compact' ? 'Compact' : 'Comfortable'}
-              </button>
-              <button
-                onClick={fetchBatches}
-                className="btn btn-secondary py-1.5 px-3 text-xs flex items-center gap-1.5"
-              >
-                <RefreshCw className="h-3.5 w-3.5" />
-                Refresh
-              </button>
-            </div>
+      {/* ─── WORKSPACE STEPPER HEADER ─── */}
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm p-4">
+        <div className="flex flex-wrap items-center justify-between gap-4 pb-3 border-b border-slate-100 dark:border-slate-800">
+          <div>
+            <h1 className="text-xl font-black text-slate-900 dark:text-white flex items-center gap-2 tracking-tight">
+              <Layers className="h-5.5 w-5.5 text-indigo-600 dark:text-indigo-400" />
+              Fuel Assurance Review Workspace
+            </h1>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              Verify fuel invoices and transaction sheets against vehicle GPS telemetry logs.
+            </p>
           </div>
-
-          {/* Quick stats dashboard */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            {[
-              { label: 'Total Batches', val: batches.length, icon: <Layers className="w-4 h-4 text-indigo-500" /> },
-              { label: 'Fleet Vehicles Checked', val: batches.reduce((acc, b) => acc + b.vehicles.length, 0), icon: <Truck className="w-4 h-4 text-emerald-500" /> },
-              {
-                label: 'Attached GPS Coverage',
-                val: batches.reduce((acc, b) => acc + (b.attachedGpsFiles?.length || 0), 0),
-                icon: <Satellite className="w-4 h-4 text-amber-500" />,
-              },
-            ].map((stat, i) => (
-              <div key={i} className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 p-4 rounded-xl shadow-sm flex items-center gap-3">
-                <div className="p-2.5 bg-gray-50 dark:bg-gray-850 rounded-lg">{stat.icon}</div>
-                <div>
-                  <span className="text-lg font-black text-gray-900 dark:text-white leading-none block">{stat.val}</span>
-                  <span className="text-[10px] text-gray-400 font-semibold block mt-0.5 uppercase tracking-wider">{stat.label}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          {/* Ingestion hints */}
-          <div className="p-4 bg-indigo-50/20 dark:bg-indigo-950/10 border border-indigo-100/50 dark:border-indigo-900/30 rounded-xl flex items-start gap-3">
-            <Info className="w-4 h-4 text-indigo-500 mt-0.5 shrink-0" />
-            <div className="text-xs text-indigo-950 dark:text-indigo-300">
-              <span className="font-bold block mb-0.5">Verification Workspace Guidelines</span>
-              <p className="text-[10px] leading-relaxed text-indigo-900/80 dark:text-indigo-450">
-                Click on any batch below to enter the **Audit Review Workspace**. Within the workspace, you can inspect high-density transaction tables, hover over rows to see exact crops of source evidence PDFs or spreadsheet cell coordinates, drag-drop telematics points to run checks, and generate exports.
-              </p>
-            </div>
-          </div>
-
-          {/* Batches Table Grid */}
-          <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl shadow-sm overflow-hidden">
-            {loading ? (
-              <div className="py-16 flex flex-col items-center justify-center gap-3">
-                <div className="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
-                <span className="text-xs text-gray-500 font-medium">Retrieving batch catalog...</span>
-              </div>
-            ) : batches.length === 0 ? (
-              <div className="py-20 text-center text-gray-400">
-                <FileText className="w-10 h-10 mx-auto mb-2 text-gray-300" />
-                <p className="text-sm font-semibold">No transaction batches present</p>
-                <p className="text-xs mt-1 text-gray-500">Upload an AS24 PDF, DKV PDF or spreadsheet to start matching.</p>
-              </div>
-            ) : (
-              <table className="w-full text-left border-collapse text-xs">
-                <thead className="bg-gray-50 dark:bg-gray-850 border-b border-gray-200 dark:border-gray-850">
-                  <tr className="text-gray-500 dark:text-gray-400 font-semibold select-none">
-                    <th className="px-5 py-3">Invoiced File</th>
-                    <th className="px-5 py-3">Provider</th>
-                    <th className="px-5 py-3">Source Type</th>
-                    <th className="px-5 py-3 text-center">Vehicles</th>
-                    <th className="px-5 py-3 text-center">Transactions</th>
-                    <th className="px-5 py-3 text-center">GPS Linked</th>
-                    <th className="px-5 py-3 text-right">Net Value</th>
-                    <th className="px-5 py-3 text-center">Status</th>
-                    <th className="px-5 py-3 text-center w-24">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-150 dark:divide-gray-850">
-                  {batches.map((b) => {
-                    const gpsCount = b.attachedGpsFiles?.length || 0;
-                    const isAllGps = gpsCount >= b.vehicles.length;
-                    
-                    return (
-                      <tr
-                        key={b.id}
-                        className="hover:bg-gray-50/50 dark:hover:bg-gray-800/20 transition-colors cursor-pointer"
-                        onClick={() => handleOpenWorkspace(b.id)}
-                      >
-                        <td className="px-5 py-3 font-semibold text-gray-900 dark:text-white truncate max-w-[200px]" title={b.filename}>
-                          {b.filename}
-                        </td>
-                        <td className="px-5 py-3">
-                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400">
-                            {b.provider}
-                          </span>
-                        </td>
-                        <td className="px-5 py-3 text-gray-500 font-medium">
-                          {b.sourceType || 'Standard Import'}
-                        </td>
-                        <td className="px-5 py-3 text-center font-bold">{b.vehicles.length}</td>
-                        <td className="px-5 py-3 text-center font-semibold text-gray-700 dark:text-gray-300">
-                          {b.chargeSummary?.totalChargesCount || b.transactionCount || 0}
-                        </td>
-                        <td className="px-5 py-3 text-center font-medium">
-                          <span className={`px-2 py-0.5 rounded-full text-[10px] ${
-                            isAllGps ? 'bg-green-100 text-green-800 dark:bg-green-950/20 dark:text-green-400' : 'bg-amber-100 text-amber-800 dark:bg-amber-950/20 dark:text-amber-400'
-                          }`}>
-                            {gpsCount} of {b.vehicles.length}
-                          </span>
-                        </td>
-                        <td className="px-5 py-3 text-right font-mono font-semibold">
-                          {b.chargeSummary?.totalAmountExVatByCurrency
-                            ? Object.entries(b.chargeSummary.totalAmountExVatByCurrency)
-                                .map(([curr, val]) => `${curr} ${parseFloat(val as any).toFixed(2)}`)
-                                .join(' / ')
-                            : '—'}
-                        </td>
-                        <td className="px-5 py-3 text-center">
-                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                            b.status === 'verified' ? 'bg-green-500/10 text-green-500' : 'bg-indigo-500/10 text-indigo-500'
-                          }`}>
-                            {b.status || 'parsed'}
-                          </span>
-                        </td>
-                        <td className="px-5 py-3 text-center" onClick={(e) => e.stopPropagation()}>
-                          <div className="flex justify-center gap-1.5">
-                            <button
-                              onClick={() => handleOpenWorkspace(b.id)}
-                              className="p-1 text-indigo-500 hover:bg-indigo-50 dark:hover:bg-indigo-950/30 rounded"
-                              title="Open audit review"
-                            >
-                              <ArrowRight className="w-4 h-4" />
-                            </button>
-                            <button
-                              onClick={() => handleDeleteBatch(b.id)}
-                              className="p-1 text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 rounded"
-                              title="Delete batch"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
+          <div className="flex items-center gap-3">
+            {/* Advanced mode switch */}
+            <button
+              onClick={toggleAdvancedMode}
+              className={`py-1 px-2.5 rounded-lg text-2xs font-semibold flex items-center gap-1 border transition-all ${
+                advancedMode 
+                  ? 'bg-indigo-600 border-indigo-600 text-white shadow-glow' 
+                  : 'bg-white border-slate-200 hover:border-slate-350 dark:bg-slate-800 dark:border-slate-700 text-slate-600 dark:text-slate-300'
+              }`}
+              title="Toggle Advanced auditor tools"
+            >
+              <Settings2 className="w-3.5 h-3.5" />
+              Advanced Mode: {advancedMode ? 'Active' : 'Off'}
+            </button>
+            <button
+              onClick={toggleDensity}
+              className="py-1 px-2.5 bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 rounded-lg text-2xs font-semibold text-slate-600 dark:text-slate-300"
+            >
+              Density: {density === 'compact' ? 'Compact' : 'Comfortable'}
+            </button>
           </div>
         </div>
-      ) : (
-        // ─── WORKSPACE REVIEW MODE ───
-        <div className="space-y-6 relative">
+
+        {/* Visual Stepper bar */}
+        <div className="grid grid-cols-5 gap-2 mt-4 text-xs font-bold text-center">
+          {[
+            { step: 1, label: '1. Upload Invoice', desc: 'DKV Excel, PDF or AS24 PDF' },
+            { step: 2, label: '2. Review Extraction', desc: 'Verify parsed transactions' },
+            { step: 3, label: '3. Upload GPS', desc: 'Attach vehicle telemetry' },
+            { step: 4, label: '4. Compare GPS', desc: 'Validate overlap evidence' },
+            { step: 5, label: '5. Approve / Flag', desc: 'Sign-off audit run' },
+          ].map((s) => {
+            const isClickable = activeBatch !== null || s.step === 1;
+            const isActive = activeStep === s.step;
+            const isCompleted = activeBatch !== null && s.step < activeStep;
+            return (
+              <button
+                key={s.step}
+                disabled={!isClickable}
+                onClick={() => {
+                  setActiveStep(s.step);
+                  setSelectedTransaction(null);
+                }}
+                className={`p-2 rounded-xl border-2 text-left transition ${
+                  isActive
+                    ? 'border-indigo-600 bg-indigo-50/20 text-indigo-700 dark:text-indigo-400'
+                    : isCompleted
+                    ? 'border-emerald-600/40 bg-emerald-50/5 text-emerald-700 dark:text-emerald-500'
+                    : 'border-slate-100 dark:border-slate-800 text-slate-400'
+                } disabled:opacity-55`}
+              >
+                <span className="block text-[11px] font-black">{s.label}</span>
+                <span className="block text-[9px] text-slate-450 mt-0.5 font-normal truncate">{s.desc}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ─── STICKY ACTION BAR (ONLY IF BATCH LOADED) ─── */}
+      {activeBatch && (
+        <div className="sticky top-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur border border-slate-200 dark:border-slate-800 rounded-2xl shadow-md p-3.5 flex flex-wrap items-center justify-between gap-4 animate-slide-down">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => router.push('/batches')}
+              className="p-1.5 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 rounded-lg transition"
+              title="Close workspace"
+            >
+              <ChevronLeft className="w-5 h-5" />
+            </button>
+            <div>
+              <h2 className="text-xs font-black text-slate-900 dark:text-white flex items-center gap-1.5">
+                {activeBatch.filename}
+                <span className="text-[9px] px-1.5 py-0.5 rounded-full font-bold bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-400">
+                  {activeBatch.provider}
+                </span>
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 font-semibold truncate max-w-[150px]">
+                  {activeBatch.sourceType}
+                </span>
+              </h2>
+              <div className="flex items-center gap-2 text-[9px] text-slate-400 font-semibold uppercase mt-0.5 tracking-wider">
+                <span>Value: {formatExVatSum(activeBatch)}</span>
+                <span>•</span>
+                <span>Txs: {transactions.length} rows</span>
+                <span>•</span>
+                <span>GPS files: {activeBatch.attachedGpsFiles?.length || 0}</span>
+                <span>•</span>
+                <span>Issues: {getUnresolvedBlockingIssuesCount()} unresolved</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={() => {
+                router.push('/batches');
+                setActiveStep(1);
+              }}
+              className="py-1 px-3 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 rounded-lg text-2xs font-semibold text-slate-600 dark:text-slate-300"
+            >
+              Upload More
+            </button>
+            <button
+              onClick={handleConfirmBatch}
+              className="py-1 px-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-2xs font-semibold flex items-center gap-1 transition shadow-sm"
+            >
+              <Check className="w-3 h-3" />
+              Confirm Extracted Data
+            </button>
+            <button
+              onClick={() => setActiveStep(3)}
+              className={`py-1 px-3 border rounded-lg text-2xs font-semibold ${
+                activeStep === 3 ? 'bg-indigo-50 border-indigo-300 text-indigo-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+              }`}
+            >
+              Upload GPS
+            </button>
+            <button
+              onClick={() => setActiveStep(4)}
+              className={`py-1 px-3 border rounded-lg text-2xs font-semibold ${
+                activeStep === 4 ? 'bg-indigo-50 border-indigo-300 text-indigo-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+              }`}
+            >
+              Run Comparison
+            </button>
+            <button
+              onClick={() => setActiveStep(5)}
+              className={`py-1 px-3 border rounded-lg text-2xs font-semibold ${
+                activeStep === 5 ? 'bg-indigo-50 border-indigo-300 text-indigo-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+              }`}
+            >
+              Approve / Flag
+            </button>
+            <button
+              onClick={handleExportCSV}
+              className="py-1 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 rounded-lg text-2xs font-semibold flex items-center gap-1 transition"
+            >
+              <Download className="w-3 h-3" />
+              Export
+            </button>
+            <button
+              onClick={toggleDensity}
+              className="p-1 border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800 rounded-lg text-slate-500 dark:text-slate-400"
+              title={`Toggle row density (Currently: ${density})`}
+            >
+              <Settings className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ─── STEP 1: UPLOAD INVOICE (NO BATCH SELECTED) ─── */}
+      {activeStep === 1 && !selectedBatchId && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           
-          {loadingBatchData && (
-            <div className="fixed inset-0 z-40 bg-white/20 dark:bg-black/20 backdrop-blur-sm flex items-center justify-center">
-              <div className="flex flex-col items-center gap-2">
-                <Loader2 className="w-8 h-8 text-indigo-500 animate-spin" />
-                <span className="text-xs text-gray-500 font-semibold">Running verification checks...</span>
-              </div>
-            </div>
-          )}
-
-          {/* Sticky Top Action Bar */}
-          <div className="sticky top-0 z-30 bg-white/95 dark:bg-gray-900/95 backdrop-blur border border-gray-200 dark:border-gray-800 rounded-xl shadow-md p-4 flex flex-wrap items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <button
-                onClick={handleCloseWorkspace}
-                className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400 rounded-lg transition-all"
-                title="Back to all batches"
-              >
-                <ChevronLeft className="w-5 h-5" />
-              </button>
-              <div>
-                <h2 className="text-sm font-black text-gray-900 dark:text-white flex items-center gap-2">
-                  {activeBatch?.filename}
-                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400">
-                    {activeBatch?.provider}
-                  </span>
-                </h2>
-                <p className="text-[10px] text-gray-500 mt-0.5 uppercase tracking-wider font-semibold">
-                  Source: {activeBatch?.sourceType || 'Invoiced Ingest'}
-                </p>
-              </div>
-            </div>
-
-            {/* Quick stats strip */}
-            {activeBatch && (
-              <div className="hidden md:flex items-center gap-4 text-[10px] font-semibold text-gray-500 border-x border-gray-150 dark:border-gray-800 px-6 py-1">
-                <div>
-                  <span className="block text-gray-400 uppercase tracking-wider text-[8px]">Net Value</span>
-                  <span className="text-xs font-bold text-gray-800 dark:text-gray-200 font-mono">
-                    {activeBatch.chargeSummary?.totalAmountExVatByCurrency
-                      ? Object.entries(activeBatch.chargeSummary.totalAmountExVatByCurrency)
-                          .map(([curr, val]) => `${curr} ${parseFloat(val as any).toFixed(2)}`)
-                          .join(' / ')
-                      : '—'}
-                  </span>
-                </div>
-                <div>
-                  <span className="block text-gray-400 uppercase tracking-wider text-[8px]">Transactions</span>
-                  <span className="text-xs font-bold text-gray-800 dark:text-gray-200">
-                    {transactions.length} rows
-                  </span>
-                </div>
-                <div>
-                  <span className="block text-gray-400 uppercase tracking-wider text-[8px]">GPS Linked</span>
-                  <span className="text-xs font-bold text-gray-850 dark:text-gray-200">
-                    {activeBatch.attachedGpsFiles?.length} of {activeBatch.vehicles.length}
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {/* Action buttons */}
-            <div className="flex items-center gap-2 flex-wrap">
-              {/* Global Density Mode Switcher */}
-              <button
-                onClick={toggleDensity}
-                className="p-2 border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800 rounded-xl transition text-gray-500 dark:text-gray-400"
-                title={`Toggle row density (Currently: ${density})`}
-              >
-                <Settings className="w-4 h-4" />
-              </button>
-
-              <button
-                onClick={handleExportCSV}
-                className="py-1.5 px-3 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-750 text-gray-700 dark:text-gray-200 rounded-xl text-xs font-semibold flex items-center gap-1 shadow-sm transition"
-              >
-                <Download className="w-3.5 h-3.5" />
-                Export
-              </button>
-
-              <label className="py-1.5 px-3 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950 dark:hover:bg-indigo-900 text-indigo-700 dark:text-indigo-300 border border-indigo-250 dark:border-indigo-900/60 rounded-xl text-xs font-semibold flex items-center gap-1 shadow-sm transition cursor-pointer">
-                <Satellite className="w-3.5 h-3.5 animate-pulse" />
-                Attach GPS
-                <input
-                  type="file"
-                  multiple
-                  onChange={handleBulkGpsUpload}
-                  className="hidden"
-                  accept=".xls,.xlsx"
-                />
-              </label>
-
-              <button
-                onClick={handleConfirmBatch}
-                className="py-1.5 px-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold flex items-center gap-1 shadow-md transition"
-              >
-                <Check className="w-4 h-4" />
-                Confirm Extracted Data
-              </button>
-            </div>
-          </div>
-
-          {/* Navigation Workspace Tabs */}
-          <div className="flex border-b border-gray-250 dark:border-gray-800 text-xs">
-            {[
-              { id: 'overview', label: 'Overview', icon: <Info className="w-3.5 h-3.5" /> },
-              { id: 'vehicles', label: 'Vehicles', icon: <Truck className="w-3.5 h-3.5" /> },
-              { id: 'transactions', label: 'Transactions', icon: <ClipboardList className="w-3.5 h-3.5" /> },
-              { id: 'exceptions', label: 'Exceptions', icon: <AlertTriangle className="w-3.5 h-3.5" /> },
-              { id: 'gps', label: 'GPS Files', icon: <Satellite className="w-3.5 h-3.5" /> },
-              { id: 'source', label: 'Source Files', icon: <FileText className="w-3.5 h-3.5" /> },
-              { id: 'approval', label: 'Approval', icon: <ShieldCheck className="w-3.5 h-3.5" /> },
-              { id: 'reports', label: 'Reports', icon: <BarChart2 className="w-3.5 h-3.5" /> },
-            ].map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id as any)}
-                className={`flex items-center gap-1.5 py-3 px-4 font-semibold border-b-2 transition-all ${
-                  activeTab === tab.id
-                    ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
-                    : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700'
-                }`}
-              >
-                {tab.icon}
-                {tab.label}
-              </button>
-            ))}
-          </div>
-
-          {/* Tab Views */}
-          <div className="mt-4">
+          {/* Left / Middle: Ingestion Dropzone & Warnings */}
+          <div className="lg:col-span-2 space-y-4">
             
-            {/* Overview Tab */}
-            {activeTab === 'overview' && activeBatch && (
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                
-                {/* Meta details */}
-                <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5 shadow-sm space-y-4">
-                  <span className="font-bold text-xs uppercase tracking-wider block text-gray-700 dark:text-gray-300">
-                    File Ingest Details
-                  </span>
-                  
-                  <div className="flex flex-col gap-2 font-mono text-[11px] text-gray-600 dark:text-gray-400">
-                    <div className="flex justify-between border-b border-gray-100 dark:border-gray-850 py-1">
-                      <span>Original Name:</span>
-                      <span className="text-gray-950 dark:text-white font-semibold truncate max-w-[160px]">{activeBatch.filename}</span>
-                    </div>
-                    <div className="flex justify-between border-b border-gray-100 dark:border-gray-850 py-1">
-                      <span>Uploaded Date:</span>
-                      <span>{new Date(activeBatch.uploadDate).toLocaleString()}</span>
-                    </div>
-                    <div className="flex justify-between border-b border-gray-100 dark:border-gray-850 py-1">
-                      <span>Provider:</span>
-                      <span>{activeBatch.provider}</span>
-                    </div>
-                    <div className="flex justify-between border-b border-gray-100 dark:border-gray-850 py-1">
-                      <span>Source Type:</span>
-                      <span>{activeBatch.sourceType}</span>
-                    </div>
-                    {activeBatch.statementNumber && (
-                      <div className="flex justify-between border-b border-gray-100 dark:border-gray-850 py-1">
-                        <span>Document Number:</span>
-                        <span>{activeBatch.statementNumber}</span>
-                      </div>
-                    )}
-                    {activeBatch.statementDate && (
-                      <div className="flex justify-between border-b border-gray-100 dark:border-gray-850 py-1">
-                        <span>Document Date:</span>
-                        <span>{activeBatch.statementDate}</span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Financial Totals */}
-                <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5 shadow-sm space-y-4">
-                  <span className="font-bold text-xs uppercase tracking-wider block text-gray-700 dark:text-gray-300">
-                    Financial Totals Summary
-                  </span>
-                  
-                  <div className="flex flex-col gap-2 font-mono text-[11px] text-gray-650 dark:text-gray-400">
-                    <div className="flex justify-between border-b border-gray-100 dark:border-gray-850 py-1">
-                      <span>Net Purchases:</span>
-                      <span className="text-gray-950 dark:text-white font-bold">
-                        {activeBatch.chargeSummary?.totalAmountExVatByCurrency
-                          ? Object.entries(activeBatch.chargeSummary.totalAmountExVatByCurrency)
-                              .map(([curr, val]) => `${curr} ${parseFloat(val as any).toFixed(2)}`)
-                              .join(' / ')
-                          : '—'}
-                      </span>
-                    </div>
-                    <div className="flex justify-between border-b border-gray-100 dark:border-gray-850 py-1">
-                      <span>Total Fuel Litres:</span>
-                      <span className="font-semibold text-gray-850 dark:text-gray-200">
-                        {activeBatch.chargeSummary?.totalFuelVolume?.toFixed(1) || '0.0'} L
-                      </span>
-                    </div>
-                    <div className="flex justify-between border-b border-gray-100 dark:border-gray-850 py-1">
-                      <span>Verification status:</span>
-                      <span className="text-indigo-600 dark:text-indigo-400 font-bold">{activeBatch.status}</span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* GPS and warnings alignment status */}
-                <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5 shadow-sm space-y-4">
-                  <span className="font-bold text-xs uppercase tracking-wider block text-gray-700 dark:text-gray-300">
-                    GPS Coverage & Health
-                  </span>
-
-                  <div className="p-3.5 bg-indigo-50/20 dark:bg-indigo-950/10 border border-indigo-150/40 dark:border-indigo-900/40 rounded-xl flex items-start gap-2.5">
-                    <Satellite className="w-5 h-5 text-indigo-500 shrink-0" />
-                    <div className="text-[11px] space-y-1">
-                      <span className="font-bold text-indigo-850 dark:text-indigo-400 block">GPS files match coverage</span>
-                      <span className="text-gray-500 block">
-                        {activeBatch.attachedGpsFiles?.length} vehicle telemetry files attached to verify{' '}
-                        {activeBatch.vehicles.length} vehicles found on invoice.
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-              </div>
-            )}
-
-            {/* Vehicles Tab */}
-            {activeTab === 'vehicles' && activeBatch && (
-              <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl shadow-sm overflow-hidden">
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead className="bg-gray-50 dark:bg-gray-850 border-b border-gray-250">
-                    <tr className="text-gray-500 dark:text-gray-400 font-semibold select-none">
-                      <th className="px-5 py-3">Vehicle</th>
-                      <th className="px-5 py-3 text-center">Transactions</th>
-                      <th className="px-5 py-3 text-right">Net Value</th>
-                      <th className="px-5 py-3 text-center">GPS Linked</th>
-                      <th className="px-5 py-3">GPS File Coverage</th>
-                      <th className="px-5 py-3 text-center">Scoring Outcome</th>
-                      <th className="px-5 py-3 text-center w-24">Link GPS File</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-150 dark:divide-gray-850">
-                    {activeBatch.vehicles.map((reg) => {
-                      const gpsAttachment = activeBatch.attachedGpsFiles?.find((a) => a.vehicleRegistration === reg);
-                      const status = activeBatch.vehicleStatuses?.[reg];
-                      const result = activeBatch.checkResults?.[reg];
-                      const txCount = transactions.filter(t => (t.registration || t.vehicleRegistration) === reg).length;
-
-                      // sum net value
-                      const netVal = transactions
-                        .filter(t => (t.registration || t.vehicleRegistration) === reg)
-                        .reduce((sum, t) => sum + parseFloat(t.paymentAmountExVat || t.baseValueNet || '0'), 0);
-
-                      return (
-                        <tr key={reg} className="hover:bg-gray-55 dark:hover:bg-gray-800/10">
-                          <td className="px-5 py-3 font-mono font-bold text-gray-900 dark:text-white">{reg}</td>
-                          <td className="px-5 py-3 text-center font-bold">{txCount}</td>
-                          <td className="px-5 py-3 text-right font-mono font-semibold">€{netVal.toFixed(2)}</td>
-                          <td className="px-5 py-3 text-center">
-                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                              gpsAttachment ? 'bg-green-500/10 text-green-500' : 'bg-amber-500/10 text-amber-500'
-                            }`}>
-                              {gpsAttachment ? 'Linked' : 'Pending'}
-                            </span>
-                          </td>
-                          <td className="px-5 py-3 max-w-[200px] truncate text-gray-500" title={gpsAttachment?.fileName}>
-                            {gpsAttachment ? (
-                              <span className="flex items-center gap-1.5 font-semibold text-gray-700 dark:text-gray-300">
-                                <Satellite className="w-3.5 h-3.5 text-indigo-500" />
-                                {gpsAttachment.fileName}
-                              </span>
-                            ) : (
-                              'No telematics attached'
-                            )}
-                          </td>
-                          <td className="px-5 py-3 text-center">
-                            {result ? (
-                              <span className="badge bg-green-500/10 text-green-600 font-bold">
-                                {result.supported} verified
-                              </span>
-                            ) : (
-                              <span className="text-gray-400">—</span>
-                            )}
-                          </td>
-                          <td className="px-5 py-3 text-center" onClick={(e) => e.stopPropagation()}>
-                            <GpsDropZone batchId={activeBatch.id} vehicleReg={reg} onDone={() => fetchBatchDetails(activeBatch.id)} />
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-            {/* Transactions Tab */}
-            {activeTab === 'transactions' && (
-              <CompactTransactionTable
-                transactions={transactions}
-                onOpenSourceViewer={setSelectedTxForSource}
-                onOpenEvidenceMatchView={setSelectedTxForMatch}
-              />
-            )}
-
-            {/* Exceptions Tab */}
-            {activeTab === 'exceptions' && (
-              <CompactTransactionTable
-                transactions={transactions.filter(t => 
-                  t.status !== 'OK' && t.status !== 'Validated' && t.status !== 'VALIDATED'
-                )}
-                onOpenSourceViewer={setSelectedTxForSource}
-                onOpenEvidenceMatchView={setSelectedTxForMatch}
-              />
-            )}
-
-            {/* GPS Files Tab */}
-            {activeTab === 'gps' && activeBatch && (
-              <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl shadow-sm overflow-hidden">
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead className="bg-gray-50 dark:bg-gray-850 border-b border-gray-200">
-                    <tr className="text-gray-500 dark:text-gray-400 font-semibold select-none">
-                      <th className="px-5 py-3">GPS File Name</th>
-                      <th className="px-5 py-3">Vehicle Linked</th>
-                      <th className="px-5 py-3">Coverage Start</th>
-                      <th className="px-5 py-3">Coverage End</th>
-                      <th className="px-5 py-3">Uploaded At</th>
-                      <th className="px-5 py-3 text-center w-24">Action</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-150 dark:divide-gray-850">
-                    {activeBatch.attachedGpsFiles?.map((file, i) => (
-                      <tr key={i} className="hover:bg-gray-50/50">
-                        <td className="px-5 py-3 font-semibold text-gray-900 dark:text-white truncate max-w-[240px]" title={file.fileName}>
-                          {file.fileName}
-                        </td>
-                        <td className="px-5 py-3 font-mono font-bold text-gray-800 dark:text-gray-250">
-                          {file.vehicleRegistration}
-                        </td>
-                        <td className="px-5 py-3 font-mono text-gray-500">
-                          {file.coverageStart ? new Date(file.coverageStart).toLocaleString() : '—'}
-                        </td>
-                        <td className="px-5 py-3 font-mono text-gray-500">
-                          {file.coverageEnd ? new Date(file.coverageEnd).toLocaleString() : '—'}
-                        </td>
-                        <td className="px-5 py-3 text-gray-400">
-                          {new Date(file.uploadedAt).toLocaleString()}
-                        </td>
-                        <td className="px-5 py-3 text-center">
-                          <button
-                            onClick={async () => {
-                              if (!confirm('Remove this GPS attachment?')) return;
-                              // delete logic here
-                              alert('Detach GPS completed.');
-                            }}
-                            className="p-1 text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 rounded"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-            {/* Source Files Tab */}
-            {activeTab === 'source' && activeBatch && (
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5 shadow-sm space-y-4">
-                  <span className="font-bold text-xs uppercase tracking-wider block text-gray-700 dark:text-gray-300">
-                    Primary Invoiced Document
-                  </span>
-                  
-                  <div className="flex flex-col gap-2.5 font-mono text-[11px] text-gray-650 dark:text-gray-400">
-                    <div className="flex justify-between border-b border-gray-100 dark:border-gray-850 py-1">
-                      <span>Document ID:</span>
-                      <span>{activeBatch.id}</span>
-                    </div>
-                    <div className="flex justify-between border-b border-gray-100 dark:border-gray-850 py-1">
-                      <span>File Name:</span>
-                      <span className="text-gray-900 dark:text-white font-semibold truncate max-w-[200px]">{activeBatch.filename}</span>
-                    </div>
-                    <div className="flex justify-between border-b border-gray-100 dark:border-gray-850 py-1">
-                      <span>Parser version:</span>
-                      <span>{activeBatch.parserVersion || '1.0.0'}</span>
-                    </div>
-                  </div>
-
-                  <div className="pt-3 flex gap-2">
-                    <a
-                      href={`/api/files/${activeBatch.id}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="py-1.5 px-3 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950 dark:hover:bg-indigo-900 text-indigo-700 dark:text-indigo-300 rounded-xl text-xs font-semibold flex items-center gap-1 transition"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      Download Raw Document
-                    </a>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Reports Tab */}
-            {activeTab === 'reports' && (
-              <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-6 shadow-sm space-y-6">
+            {error && (
+              <div className="p-4 bg-rose-500/5 border border-rose-200 dark:border-rose-900/50 text-rose-700 dark:text-rose-400 rounded-2xl flex items-start gap-3">
+                <XCircle className="w-5 h-5 mt-0.5 shrink-0" />
                 <div>
-                  <h3 className="text-sm font-bold text-gray-900 dark:text-white">
-                    Audit Verification Reports
-                  </h3>
-                  <p className="text-xs text-gray-500 mt-1">
-                    Export audit compliance evidence and mismatch logs.
-                  </p>
+                  <span className="font-bold text-sm block">Invoice structure match failed</span>
+                  <p className="text-xs mt-0.5 leading-normal">{error}</p>
                 </div>
+              </div>
+            )}
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  {[
-                    {
-                      title: 'Brief Summary Report',
-                      desc: 'Compact table listing net value, quantities, and verification rates by vehicle.',
-                      action: handleExportCSV,
-                    },
-                    {
-                      title: 'Exceptions-Only Report',
-                      desc: 'Logs only transactions flagged as parser mapping errors, variance alerts, or unmatched GPS.',
-                      action: handleExportCSV,
-                    },
-                    {
-                      title: 'Full Audit Trail Report',
-                      desc: 'Extensive report detailing coordinates, sheet row indices, timezones, and reasoning ledgers.',
-                      action: handleExportCSV,
-                    },
-                  ].map((rep, idx) => (
-                    <div key={idx} className="p-4 bg-gray-50 dark:bg-gray-850 border border-gray-200 dark:border-gray-800 rounded-xl flex flex-col justify-between">
-                      <div className="space-y-1.5">
-                        <span className="font-bold text-xs text-gray-800 dark:text-gray-200 block">{rep.title}</span>
-                        <p className="text-[10px] text-gray-500 leading-normal">{rep.desc}</p>
+            <div
+              {...getInvoiceProps()}
+              className={`border-2 border-dashed rounded-2xl flex flex-col items-center justify-center py-20 text-center cursor-pointer transition-all ${
+                invoiceDrag
+                  ? 'border-indigo-500 bg-indigo-50/10'
+                  : 'border-slate-250 dark:border-slate-800 hover:border-indigo-400 hover:bg-slate-50/20'
+              }`}
+            >
+              <input {...getInvoiceInput()} />
+              <Upload className="h-10 w-10 text-slate-400 mb-3" />
+              <p className="text-sm font-extrabold text-slate-900 dark:text-white">
+                Drop invoice or transaction file here
+              </p>
+              <p className="text-2xs text-slate-500 mt-1 max-w-sm leading-normal">
+                Supports **DKV PDF Invoices**, **DKV Excel reports** (Daily Authorization & Invoice-Period), and **AS24 PDF Invoices**.
+              </p>
+            </div>
+
+            {/* Failed Imports Table */}
+            {failedImports.length > 0 && (
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 space-y-3 shadow-sm">
+                <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                  <span className="text-xs font-bold text-rose-600 flex items-center gap-1">
+                    <AlertTriangle className="w-4 h-4" />
+                    Failed Imports queue
+                  </span>
+                  <button
+                    onClick={() => {
+                      setFailedImports([]);
+                      localStorage.removeItem('fuel_assurance_failed_imports');
+                    }}
+                    className="text-2xs text-slate-400 hover:text-slate-650"
+                  >
+                    Clear all failed
+                  </button>
+                </div>
+                <div className="space-y-2.5 max-h-48 overflow-y-auto">
+                  {failedImports.map((fail) => (
+                    <div key={fail.id} className="p-3 bg-rose-500/5 border border-rose-200/50 rounded-xl text-xs space-y-1">
+                      <div className="flex justify-between font-bold text-slate-900 dark:text-white">
+                        <span>{fail.fileName}</span>
+                        <span className="text-3xs text-slate-400 font-normal">
+                          {new Date(fail.timestamp).toLocaleTimeString()}
+                        </span>
                       </div>
-                      <button
-                        onClick={rep.action}
-                        className="w-full mt-4 py-1.5 bg-white hover:bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-200 border border-gray-200 dark:border-gray-800 rounded-lg text-[10px] font-semibold transition"
-                      >
-                        Generate CSV Report
-                      </button>
+                      <p className="text-[11px] text-slate-500">{fail.errorReason}</p>
+                      {fail.technicalDetails && (
+                        <details className="mt-1 text-3xs text-slate-400 cursor-pointer">
+                          <summary>View technical details</summary>
+                          <pre className="mt-1 p-2 bg-slate-900 text-slate-300 rounded font-mono truncate whitespace-pre-wrap max-w-full">
+                            {fail.technicalDetails}
+                          </pre>
+                        </details>
+                      )}
                     </div>
                   ))}
                 </div>
               </div>
             )}
+          </div>
 
-            {/* Approval Tab */}
-            {activeTab === 'approval' && activeBatch && (
-              <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-6 shadow-sm space-y-6 animate-fade-in">
-                <div className="flex flex-wrap items-center justify-between gap-4 border-b border-gray-150 dark:border-gray-800 pb-4">
-                  <div>
-                    <h3 className="text-sm font-bold text-gray-900 dark:text-white flex items-center gap-2">
-                      <ShieldCheck className="w-5 h-5 text-indigo-500" />
-                      Invoice Verification Approval Workflow
-                    </h3>
-                    <p className="text-xs text-gray-550 mt-0.5">
-                      Review extracted data metrics, check exceptions status, and sign off the reconciliation run.
-                    </p>
+          {/* Right Panel: Continued Reviews */}
+          <div className="space-y-4">
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 shadow-sm space-y-3">
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-450 block">
+                Continue In-Progress Reviews
+              </span>
+              {loading ? (
+                <div className="py-6 flex justify-center">
+                  <Loader2 className="w-6 h-6 animate-spin text-slate-400" />
+                </div>
+              ) : batches.length === 0 ? (
+                <p className="text-2xs text-slate-500 text-center py-6">No active verification batches found.</p>
+              ) : (
+                <div className="space-y-2 max-h-[360px] overflow-y-auto">
+                  {batches.map((b) => (
+                    <div
+                      key={b.id}
+                      onClick={() => router.push(`/batches?id=${b.id}`)}
+                      className="p-3 bg-slate-50/50 hover:bg-slate-100/50 dark:bg-slate-850/50 dark:hover:bg-slate-800/50 border border-slate-150 dark:border-slate-800 rounded-xl cursor-pointer transition flex flex-col gap-1"
+                    >
+                      <div className="flex justify-between items-start">
+                        <span className="font-extrabold text-xs text-slate-900 dark:text-white truncate max-w-[160px]">{b.filename}</span>
+                        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-indigo-50/50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 uppercase">
+                          {b.provider}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center text-[10px] text-slate-450 font-mono mt-0.5">
+                        <span>{new Date(b.uploadDate).toLocaleDateString()}</span>
+                        <span>{b.transactionCount || 0} rows</span>
+                      </div>
+                      <div className="flex items-center justify-between text-[9px] mt-1.5">
+                        <span className="text-slate-400">GPS: {b.attachedGpsFiles?.length || 0} vehicles</span>
+                        <span className="text-indigo-500 hover:underline flex items-center gap-0.5 font-bold">
+                          Continue <ArrowRight className="w-2.5 h-2.5" />
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+        </div>
+      )}
+
+      {/* ─── CORE WORKSPACE LAYOUT (LEFT/RIGHT SPLIT) ─── */}
+      {activeBatch && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          
+          {/* ───────────────── LEFT PANEL: INVOICED TRANSACTIONS ───────────────── */}
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm p-4 flex flex-col gap-4 overflow-hidden min-h-[75vh]">
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-450 flex items-center gap-1">
+                <ClipboardList className="w-4 h-4 text-indigo-500" />
+                Extracted Invoice Transactions
+              </span>
+              <span className="text-2xs text-slate-400 font-mono">
+                {transactions.length} records parsed
+              </span>
+            </div>
+
+            <div className="flex-1 overflow-x-auto">
+              <CompactTransactionTable
+                transactions={transactions}
+                onOpenSourceViewer={(tx) => setSelectedTxForSource(tx)}
+                onOpenEvidenceMatchView={(tx) => {
+                  setSelectedTransaction(tx);
+                  setSelectedTxForMatch(tx);
+                  setActiveStep(4); // navigate to comparison step
+                }}
+                selectedVehicle={selectedTransaction?.registration}
+              />
+            </div>
+
+            {/* STEP 4 SOURCE PREVIEW (UNDER THE TABLE ON THE LEFT) */}
+            {activeStep === 4 && selectedTransaction && (
+              <div className="border-t border-slate-150 dark:border-slate-800 pt-3 space-y-2">
+                <div className="flex justify-between items-center text-[10px] text-slate-400">
+                  <span className="font-bold uppercase tracking-wider text-slate-500">
+                    Source Document Evidence Highlight
+                  </span>
+                  <span>
+                    File: {selectedTransaction.sourceEvidence?.sourceFileName || 'N/A'} (Page/Row: {selectedTransaction.sourceEvidence?.pageNumber || selectedTransaction.sourceEvidence?.rowNumber})
+                  </span>
+                </div>
+                
+                {selectedTransaction.sourceEvidence ? (
+                  <div className="bg-slate-50 dark:bg-slate-950/40 rounded-xl p-3 border border-slate-200 dark:border-slate-800 space-y-2">
+                    {selectedTransaction.sourceEvidence.sourceType?.includes('PDF') ? (
+                      <div className="w-full bg-white dark:bg-slate-900 rounded border border-slate-200 dark:border-slate-800 overflow-hidden flex justify-center py-4">
+                        <PDFPageRenderer
+                          fileId={selectedTransaction.sourceEvidence.sourceFileId}
+                          pageNumber={selectedTransaction.sourceEvidence.pageNumber}
+                          boundingBox={selectedTransaction.sourceEvidence.boundingBox}
+                          crop={true}
+                          scale={1.3}
+                        />
+                      </div>
+                    ) : (
+                      <div className="p-3 bg-white dark:bg-slate-900 border rounded-xl font-mono text-3xs space-y-1 overflow-x-auto leading-normal">
+                        <div className="text-slate-450 border-b border-slate-100 pb-1 mb-1 font-bold">EXCEL SHEET: {selectedTransaction.sourceEvidence.worksheetName} · ROW: {selectedTransaction.sourceEvidence.rowNumber}</div>
+                        <div>Line Raw Content:</div>
+                        <p className="bg-slate-50 dark:bg-slate-850 p-2 rounded text-slate-800 dark:text-slate-200 whitespace-pre">{selectedTransaction.sourceEvidence.rawText || 'No raw line capture available.'}</p>
+                      </div>
+                    )}
                   </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-gray-500 font-medium">Current Stage:</span>
-                    <span className="px-2.5 py-1 rounded text-xs font-bold bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-400 uppercase border border-indigo-200 dark:border-indigo-900/60">
-                      {activeBatch.approvalStatus || 'DRAFT'}
+                ) : (
+                  <div className="text-center p-4 text-slate-400 border border-dashed rounded-xl">
+                    No precise bounding coordinates found.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* ───────────────── RIGHT PANEL: DYNAMIC STEPS ───────────────── */}
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm p-4 flex flex-col gap-4 overflow-hidden min-h-[75vh]">
+            
+            {/* STEP 2: REVIEW EXTRACTION DETAILS */}
+            {activeStep === 2 && (
+              <div className="space-y-4 animate-fade-in flex-1 flex flex-col justify-between">
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                    <span className="text-xs font-bold uppercase tracking-wider text-slate-450">
+                      Step 2: Review Extraction Summary
                     </span>
+                    <span className="px-2 py-0.5 rounded text-3xs font-extrabold bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-400 border border-indigo-200/50">
+                      EXTRACTION CONFIRMED
+                    </span>
+                  </div>
+
+                  {activeBatch.parsingWarnings && activeBatch.parsingWarnings.length > 0 && (
+                    <div className="p-3 bg-amber-500/5 border border-amber-250 rounded-xl text-amber-700 dark:text-amber-400 text-xs">
+                      <span className="font-bold flex items-center gap-1 mb-1">
+                        <AlertTriangle className="w-4 h-4 shrink-0" />
+                        Parser Warnings Detected
+                      </span>
+                      <ul className="list-disc pl-4 space-y-0.5 text-3xs">
+                        {activeBatch.parsingWarnings.map((w, i) => <li key={i}>{w}</li>)}
+                      </ul>
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-2 gap-3 text-xs">
+                    <div className="p-3 bg-slate-50/50 dark:bg-slate-850/50 border border-slate-150 dark:border-slate-800 rounded-xl space-y-1">
+                      <span className="text-[10px] text-slate-400 block font-semibold">PROVIDER</span>
+                      <span className="font-extrabold text-slate-900 dark:text-white">{activeBatch.provider}</span>
+                    </div>
+                    <div className="p-3 bg-slate-50/50 dark:bg-slate-850/50 border border-slate-150 dark:border-slate-800 rounded-xl space-y-1">
+                      <span className="text-[10px] text-slate-400 block font-semibold">DOCUMENT NO.</span>
+                      <span className="font-extrabold font-mono text-slate-900 dark:text-white truncate block">{activeBatch.statementNumber || '—'}</span>
+                    </div>
+                    <div className="p-3 bg-slate-50/50 dark:bg-slate-850/50 border border-slate-150 dark:border-slate-800 rounded-xl space-y-1">
+                      <span className="text-[10px] text-slate-400 block font-semibold">TOTAL MONETARY VALUE (EX VAT)</span>
+                      <span className="font-extrabold font-mono text-slate-900 dark:text-white">{formatExVatSum(activeBatch)}</span>
+                    </div>
+                    <div className="p-3 bg-slate-50/50 dark:bg-slate-850/50 border border-slate-150 dark:border-slate-800 rounded-xl space-y-1">
+                      <span className="text-[10px] text-slate-400 block font-semibold">TOTAL VOLUMETRIC QUANTITY</span>
+                      <span className="font-extrabold font-mono text-slate-900 dark:text-white">
+                        {activeBatch.chargeSummary?.totalFuelVolume ? activeBatch.chargeSummary.totalFuelVolume.toFixed(2) : '0.00'} L
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Vehicles Identified list */}
+                  <div className="space-y-2">
+                    <span className="text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                      <Truck className="w-4 h-4 text-slate-450" />
+                      Invoiced Fleet Vehicles Identified ({activeBatch.vehicles.length})
+                    </span>
+                    <div className="border border-slate-150 dark:border-slate-800 rounded-xl overflow-hidden text-2xs">
+                      <div className="w-full text-left">
+                        <div className="grid grid-cols-4 bg-slate-50 dark:bg-slate-850 text-slate-500 font-semibold border-b border-slate-150 select-none p-2 text-xs">
+                          <div>Registration</div>
+                          <div className="text-right">Transactions</div>
+                          <div className="text-center">GPS Linked</div>
+                          <div className="text-right">Scoring</div>
+                        </div>
+                        <div className="divide-y divide-slate-100 dark:divide-slate-850 font-mono">
+                          {activeBatch.vehicles.map((reg) => {
+                            const gpsAttachment = activeBatch.attachedGpsFiles?.find(
+                              (a) => normalizeRegistration(a.vehicleRegistration) === normalizeRegistration(reg)
+                            );
+                            const result = activeBatch.checkResults?.[reg.replace(/\s+/g, '').toUpperCase()];
+                            const txCount = transactions.filter(t => normalizeRegistration(t.registration || t.vehicleRegistration) === normalizeRegistration(reg)).length;
+                            return (
+                              <div key={reg} className="grid grid-cols-4 hover:bg-slate-50/50 p-2 items-center text-xs">
+                                <div className="font-bold text-slate-955 dark:text-white truncate">{reg}</div>
+                                <div className="text-right">{txCount}</div>
+                                <div className="text-center font-sans">
+                                  <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                                    gpsAttachment ? 'bg-green-150 text-green-700 dark:bg-green-950/20' : 'bg-amber-150 text-amber-700'
+                                  }`}>
+                                    {gpsAttachment ? 'Linked' : 'Pending'}
+                                  </span>
+                                </div>
+                                <div className="text-right font-sans text-slate-500">
+                                  {result ? `${result.supported} / ${txCount} OK` : '—'}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
 
-                {/* Blocker warning block */}
-                {getUnresolvedBlockingIssuesCount() > 0 ? (
-                  <div className="p-4 bg-rose-50 dark:bg-rose-955/20 border border-rose-200 dark:border-rose-900/40 rounded-xl flex items-start gap-3 animate-slide-down">
-                    <AlertTriangle className="w-5 h-5 text-rose-500 shrink-0 mt-0.5" />
-                    <div>
-                      <span className="font-bold text-xs text-rose-800 dark:text-rose-405 block">
-                        Approval Blocked — {getUnresolvedBlockingIssuesCount()} review items remain
-                      </span>
-                      <p className="text-[10px] text-rose-605 dark:text-rose-455 mt-1 leading-relaxed">
-                        You cannot approve this invoice batch until all transactional warnings, parser mapping failures, or missing vehicle GPS attachments are resolved. Please attach all vehicle GPS telemetry data or resolve parsing exceptions.
-                      </p>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="p-4 bg-green-50 dark:bg-green-950/10 border border-green-200/55 rounded-xl flex items-start gap-3 animate-slide-down">
-                    <CheckCircle2 className="w-5 h-5 text-green-500 shrink-0 mt-0.5" />
-                    <div>
-                      <span className="font-bold text-xs text-green-800 dark:text-green-400 block">
-                        Extraction Checks Validated
-                      </span>
-                      <p className="text-[10px] text-green-605 dark:text-green-400 mt-1">
-                        All vehicle registrations are mapped, financial totals are matched, and GPS telemetry coverage is complete. This batch is ready for sign-off.
-                      </p>
-                    </div>
-                  </div>
-                )}
+                <div className="flex gap-2.5 pt-4 border-t border-slate-150 dark:border-slate-800">
+                  <button
+                    onClick={() => setActiveStep(3)}
+                    className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold shadow-md flex items-center justify-center gap-1 transition"
+                  >
+                    Upload GPS Files <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            )}
 
-                {/* Split grid for notes and summary */}
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                  
-                  {/* Left Column: Metrics Summary */}
-                  <div className="space-y-4">
-                    <span className="font-bold text-xs uppercase tracking-wider block text-gray-700 dark:text-gray-300">Approval Summary Report</span>
-                    <div className="border border-gray-150 dark:border-gray-800 rounded-xl overflow-hidden font-mono text-[10px] divide-y divide-gray-100 dark:divide-gray-850 bg-gray-50/20 dark:bg-black/10">
-                      <div className="flex justify-between p-2.5">
-                        <span>Source File:</span>
-                        <span className="font-sans font-semibold">{activeBatch.filename}</span>
-                      </div>
-                      <div className="flex justify-between p-2.5">
-                        <span>Provider:</span>
-                        <span className="font-sans font-semibold">{activeBatch.provider}</span>
-                      </div>
-                      <div className="flex justify-between p-2.5">
-                        <span>Transaction Count:</span>
-                        <span>{transactions.length} rows</span>
-                      </div>
-                      <div className="flex justify-between p-2.5">
-                        <span>Vehicles Checked:</span>
-                        <span>{activeBatch.vehicles.length} units</span>
-                      </div>
-                      <div className="flex justify-between p-2.5">
-                        <span>GPS Files Attached:</span>
-                        <span>{activeBatch.attachedGpsFiles?.length || 0} files</span>
-                      </div>
-                      <div className="flex justify-between p-2.5 bg-green-50/30 dark:bg-green-950/10">
-                        <span>Supported / Likely verified:</span>
-                        <span className="text-green-600 dark:text-green-400 font-bold">
-                          {transactions.filter(t => t.telematicsAssessment?.classification === 'VERIFIED' || t.telematicsAssessment?.classification === 'LIKELY').length}
-                        </span>
-                      </div>
-                      <div className="flex justify-between p-2.5 bg-amber-50/30 dark:bg-amber-950/10">
-                        <span>Review Required / Insufficient Evidence:</span>
-                        <span className="text-amber-600 dark:text-amber-400 font-bold">
-                          {transactions.filter(t => t.telematicsAssessment?.classification === 'REVIEW' || t.telematicsAssessment?.classification === 'INSUFFICIENT_EVIDENCE').length}
-                        </span>
-                      </div>
-                      <div className="flex justify-between p-2.5 bg-rose-50/30 dark:bg-rose-950/10">
-                        <span>Not Supported:</span>
-                        <span className="text-rose-600 dark:text-rose-400 font-bold">
-                          {transactions.filter(t => t.telematicsAssessment?.classification === 'UNLIKELY').length}
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Action buttons */}
-                    <div className="flex flex-wrap gap-2 pt-2">
-                      <button
-                        onClick={() => updateApprovalStatus('extraction_review_pending')}
-                        className="py-1.5 px-3 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-750 text-gray-700 dark:text-gray-300 rounded-lg text-xs font-semibold"
-                      >
-                        Confirm extraction
-                      </button>
-                      <button
-                        onClick={() => updateApprovalStatus('ready_for_gps')}
-                        className="py-1.5 px-3 bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-750 text-gray-700 dark:text-gray-300 rounded-lg text-xs font-semibold"
-                      >
-                        Ready for GPS
-                      </button>
-                      <button
-                        disabled={getUnresolvedBlockingIssuesCount() > 0}
-                        onClick={() => updateApprovalStatus('ready_to_approve')}
-                        className="py-1.5 px-3 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950 dark:hover:bg-indigo-900 text-indigo-750 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-900/60 rounded-lg text-xs font-semibold disabled:opacity-50"
-                      >
-                        Mark Ready to Approve
-                      </button>
-                      <button
-                        disabled={getUnresolvedBlockingIssuesCount() > 0}
-                        onClick={() => updateApprovalStatus('approved')}
-                        className="py-1.5 px-4 bg-green-600 hover:bg-green-500 text-white rounded-lg text-xs font-semibold disabled:opacity-50"
-                      >
-                        Approve Invoice
-                      </button>
-                      <button
-                        onClick={() => updateApprovalStatus('needs_review')}
-                        className="py-1.5 px-3 bg-amber-500 hover:bg-amber-400 text-white rounded-lg text-xs font-semibold"
-                      >
-                        Flag for review
-                      </button>
-                      <button
-                        onClick={() => updateApprovalStatus('rejected')}
-                        className="py-1.5 px-3 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-semibold"
-                      >
-                        Reject Batch
-                      </button>
-                    </div>
+            {/* STEP 3: UPLOAD GPS MULTIPLE FILES */}
+            {activeStep === 3 && (
+              <div className="space-y-4 animate-fade-in flex-1 flex flex-col justify-between">
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                    <span className="text-xs font-bold uppercase tracking-wider text-slate-450">
+                      Step 3: Ingest Vehicle GPS Data
+                    </span>
+                    <span className="text-3xs text-slate-400 font-bold uppercase">
+                      {activeBatch.attachedGpsFiles?.length || 0} files attached
+                    </span>
                   </div>
 
-                  {/* Right Column: Reviewer Notes & Audit Timeline */}
-                  <div className="space-y-4">
-                    <div className="space-y-1.5">
-                      <span className="font-bold text-xs uppercase tracking-wider block text-gray-700 dark:text-gray-300">Reviewer Notes</span>
-                      <textarea
-                        defaultValue={activeBatch.reviewerNotes || ''}
-                        placeholder="Add batch notes, exceptions remarks or validation context..."
-                        onBlur={(e) => updateApprovalStatus(activeBatch.approvalStatus || 'draft', e.target.value)}
-                        className="w-full text-xs p-3 bg-gray-50 dark:bg-gray-855 border border-gray-205 dark:border-gray-800 rounded-xl h-24 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-sans text-gray-800 dark:text-gray-200"
-                      />
-                      <span className="text-[10px] text-gray-400 block">Notes auto-save when clicking outside the text box.</span>
-                    </div>
+                  <div
+                    {...getGpsProps()}
+                    className={`border-2 border-dashed rounded-2xl flex flex-col items-center justify-center py-10 text-center cursor-pointer transition-all ${
+                      gpsDrag
+                        ? 'border-indigo-500 bg-indigo-50/10'
+                        : 'border-slate-250 dark:border-slate-800 hover:border-indigo-400 hover:bg-slate-50/20'
+                    }`}
+                  >
+                    <input {...getGpsInput()} />
+                    <Satellite className="h-8 w-8 text-slate-400 mb-2 animate-pulse" />
+                    <p className="text-xs font-extrabold text-slate-900 dark:text-white">
+                      Drag and drop telematics Excel log files here
+                    </p>
+                    <p className="text-[10px] text-slate-500 mt-0.5">
+                      Supports multiple vehicle GPS logs upload (XLS, XLSX)
+                    </p>
+                  </div>
 
-                    {/* Timeline History */}
+                  {/* Attached GPS Files summary */}
+                  {activeBatch.attachedGpsFiles && activeBatch.attachedGpsFiles.length > 0 && (
                     <div className="space-y-2">
-                      <span className="font-bold text-xs uppercase tracking-wider block text-gray-700 dark:text-gray-300">Audit Trail History</span>
-                      <div className="max-h-[200px] overflow-y-auto border border-gray-150 dark:border-gray-800 rounded-xl p-3 bg-gray-50/30 dark:bg-black/10 divide-y divide-gray-100 dark:divide-gray-850 text-[10px]">
-                        {!activeBatch.auditHistory || activeBatch.auditHistory.length === 0 ? (
-                          <div className="text-gray-455 dark:text-gray-500 py-2">No audits recorded. Transitions log automatically on status updates.</div>
-                        ) : (
-                          activeBatch.auditHistory.map((item: any, idx: number) => (
-                            <div key={item.id || idx} className="py-2 first:pt-0 last:pb-0">
-                              <div className="flex justify-between font-semibold text-gray-800 dark:text-gray-250">
-                                <span>{item.details}</span>
-                                <span className="text-gray-400 font-normal">{new Date(item.timestamp).toLocaleString()}</span>
-                              </div>
-                              <span className="text-[9px] text-gray-400 mt-0.5 block">By: {item.user}</span>
+                      <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                        Linked GPS Telemetry logs
+                      </span>
+                      <div className="space-y-2 max-h-56 overflow-y-auto">
+                        {activeBatch.attachedGpsFiles.map((file, i) => (
+                          <div key={i} className="p-3 bg-slate-50/50 border border-slate-150 dark:border-slate-800 rounded-xl text-2xs space-y-1 relative">
+                            <div className="flex justify-between font-bold text-slate-900 dark:text-white">
+                              <span className="truncate max-w-[200px]" title={file.fileName}>{file.fileName}</span>
+                              <span className="font-mono text-indigo-600 dark:text-indigo-400">{file.vehicleRegistration}</span>
                             </div>
-                          ))
+                            <div className="text-[10px] text-slate-450 font-mono space-y-0.5">
+                              <div>Coverage: {file.coverageStart ? new Date(file.coverageStart).toLocaleDateString() : '—'} to {file.coverageEnd ? new Date(file.coverageEnd).toLocaleDateString() : '—'}</div>
+                              {file.gpsRecordCount && <div>Records: {file.gpsRecordCount} points</div>}
+                              {file.fuelLevelMin !== undefined && (
+                                <div>Sensors: fuel {file.fuelLevelMin}%-{file.fuelLevelMax}%, odometer {file.odometerMin}-{file.odometerMax} km</div>
+                              )}
+                            </div>
+                            <button
+                              onClick={async () => {
+                                if (!confirm('Detach this GPS file?')) return;
+                                // remove attachment from batch
+                                const nextFiles = activeBatch.attachedGpsFiles?.filter((_, idx) => idx !== i);
+                                const vehicleStatuses = { ...(activeBatch.vehicleStatuses || {}) };
+                                delete vehicleStatuses[file.vehicleRegistration];
+                                const checkResults = { ...(activeBatch.checkResults || {}) };
+                                delete checkResults[file.vehicleRegistration];
+                                
+                                await fetch(`/api/batches/${activeBatch.id}`, {
+                                  method: 'PATCH',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({
+                                    attachedGpsFiles: nextFiles,
+                                    vehicleStatuses,
+                                    vehicleCheckStatuses: vehicleStatuses,
+                                    checkResults,
+                                    verificationResults: checkResults,
+                                  })
+                                });
+                                fetchBatchDetails(activeBatch.id);
+                              }}
+                              className="absolute right-2.5 top-2.5 p-1 text-slate-400 hover:text-red-500 rounded"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex gap-2.5 pt-4 border-t border-slate-150 dark:border-slate-800">
+                  <button
+                    onClick={() => setActiveStep(4)}
+                    className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold shadow-md flex items-center justify-center gap-1 transition"
+                  >
+                    Run Verification Comparison <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* STEP 4: SIDE-BY-SIDE COMPARE */}
+            {activeStep === 4 && (
+              <div className="space-y-4 animate-fade-in flex-1 flex flex-col justify-between">
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                    <span className="text-xs font-bold uppercase tracking-wider text-slate-450">
+                      Step 4: GPS Evidence Reconciliation
+                    </span>
+                    {selectedTransaction && (
+                      <span className={`px-2 py-0.5 rounded text-3xs font-extrabold ${
+                        selectedTransaction.telematicsAssessment?.classification === 'VERIFIED'
+                          ? 'bg-green-150 text-green-700'
+                          : 'bg-amber-150 text-amber-700'
+                      }`}>
+                        {selectedTransaction.telematicsAssessment?.classification || 'NO GPS'}
+                      </span>
+                    )}
+                  </div>
+
+                  {!selectedTransaction ? (
+                    <div className="py-20 text-center text-slate-400 space-y-2">
+                      <Satellite className="w-10 h-10 mx-auto text-slate-300 animate-bounce" />
+                      <p className="text-xs font-semibold">Select a transaction on the left</p>
+                      <p className="text-[10px] text-slate-500">We will extract the corresponding timeline logs, odometer records, and fuel tank levels.</p>
+                    </div>
+                  ) : loadingEvidence ? (
+                    <div className="py-20 text-center text-slate-400 space-y-2">
+                      <Loader2 className="w-8 h-8 mx-auto text-indigo-500 animate-spin" />
+                      <p className="text-xs font-semibold">Extracting telemetry logs...</p>
+                    </div>
+                  ) : selectedTxEvidence ? (
+                    <div className="space-y-4 text-xs">
+                      
+                      {/* Nearest Point Card */}
+                      <div className="bg-slate-50 dark:bg-slate-850 border border-slate-150 dark:border-slate-800 rounded-xl p-3.5 space-y-2">
+                        <span className="font-extrabold text-[10px] text-slate-450 uppercase tracking-wider block flex items-center gap-1.5">
+                          <MapPin className="w-3.5 h-3.5 text-indigo-500" />
+                          Vehicle Position at Transaction Date
+                        </span>
+
+                        {selectedTxEvidence.beforePoint || selectedTxEvidence.afterPoint ? (
+                          <div className="space-y-2 text-2xs leading-normal">
+                            <div className="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-1">
+                              <span className="text-slate-400">Transaction Time:</span>
+                              <span className="font-mono font-bold text-slate-700 dark:text-slate-350">
+                                {new Date(selectedTransaction.transactionTimestamp || selectedTransaction.transactionDateTime).toLocaleString()}
+                              </span>
+                            </div>
+
+                            {/* Nearest point details */}
+                            {(() => {
+                              const pts = selectedTxEvidence.pointsInWindow || [];
+                              const txTime = new Date(selectedTransaction.transactionTimestamp || selectedTransaction.transactionDateTime).getTime();
+                              let nearest = null;
+                              let minDiff = Infinity;
+                              for (const pt of pts) {
+                                const diff = Math.abs(new Date(pt.timestamp).getTime() - txTime);
+                                if (diff < minDiff) {
+                                  minDiff = diff;
+                                  nearest = pt;
+                                }
+                              }
+                              if (!nearest) nearest = selectedTxEvidence.beforePoint || selectedTxEvidence.afterPoint;
+                              const diffMins = Math.round(Math.abs(new Date(nearest.timestamp).getTime() - txTime) / 60000);
+                              return (
+                                <>
+                                  <div className="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-1">
+                                    <span className="text-slate-400">Nearest Point time:</span>
+                                    <span className="font-mono text-slate-700 dark:text-slate-350">
+                                      {new Date(nearest.timestamp).toLocaleString()} ({diffMins} min diff)
+                                    </span>
+                                  </div>
+                                  <div className="flex justify-between border-b border-slate-100 dark:border-slate-800 pb-1">
+                                    <span className="text-slate-400">Address / Location:</span>
+                                    <span className="font-bold text-slate-900 dark:text-white truncate max-w-[200px] text-right" title={nearest.locationAddress}>
+                                      {nearest.locationAddress || `${nearest.latitude}, ${nearest.longitude}`}
+                                    </span>
+                                  </div>
+                                  <div className="grid grid-cols-3 gap-2 pt-1.5 font-mono text-[10px] text-center select-none">
+                                    <div className="bg-white dark:bg-slate-900 border border-slate-150 rounded p-1">
+                                      <span className="text-[7px] text-slate-400 block uppercase">Speed</span>
+                                      <span className="font-extrabold">{nearest.speedKmh ?? '0'} km/h</span>
+                                    </div>
+                                    <div className="bg-white dark:bg-slate-900 border border-slate-150 rounded p-1">
+                                      <span className="text-[7px] text-slate-400 block uppercase">Odometer</span>
+                                      <span className="font-extrabold">{nearest.odometerKm ?? '0'} km</span>
+                                    </div>
+                                    <div className="bg-white dark:bg-slate-900 border border-slate-150 rounded p-1">
+                                      <span className="text-[7px] text-slate-400 block uppercase">Fuel Level</span>
+                                      <span className="font-extrabold text-emerald-600">
+                                        {nearest.fuelLevelPercent !== null ? `${Math.round(nearest.fuelLevelPercent)}%` : '—'}
+                                      </span>
+                                    </div>
+                                  </div>
+                                </>
+                              );
+                            })()}
+                          </div>
+                        ) : (
+                          <div className="p-2.5 bg-rose-50 dark:bg-rose-955/20 border border-rose-200/50 rounded-lg text-2xs text-rose-700 leading-normal">
+                            <span className="font-extrabold block mb-0.5">No matching GPS points found</span>
+                            <p className="text-3xs text-rose-600">The GPS file does not appear to cover the date range of this transaction ({selectedTransaction.transactionDate}). Check for gaps in the telematics files or link a different GPS spreadsheet.</p>
+                          </div>
                         )}
                       </div>
+
+                      {/* Expected vs Observed fuel movement (diesel only) */}
+                      {['DIESEL', 'GNR', 'RED_DIESEL'].includes(selectedTransaction.productType) && (
+                        <div className="p-3 bg-slate-50/50 dark:bg-slate-850/50 border border-slate-150 dark:border-slate-800 rounded-xl space-y-2">
+                          <span className="font-bold text-[10px] text-slate-500 uppercase tracking-wider block">Fuel Movement Diagnostics</span>
+                          <div className="grid grid-cols-2 gap-3 text-2xs font-mono">
+                            <div className="bg-white dark:bg-slate-900 border border-slate-150 rounded p-2">
+                              <span className="text-[8px] text-slate-450 block font-sans">Expected fill volume:</span>
+                              <span className="font-bold text-indigo-600 font-mono">
+                                +{Math.round((parseFloat(selectedTransaction.quantity || selectedTransaction.volume || '0') / 1200) * 100)}%
+                              </span>
+                              <span className="text-[8px] text-slate-400 block font-sans mt-0.5">For {parseFloat(selectedTransaction.quantity || selectedTransaction.volume || '0').toFixed(2)}L in 1200L tank</span>
+                            </div>
+                            <div className="bg-white dark:bg-slate-900 border border-slate-150 rounded p-2">
+                              <span className="text-[8px] text-slate-450 block font-sans">Observed level increase:</span>
+                              {(() => {
+                                const fuelFactor = selectedTxEvidence.assessment?.factors?.find((f: any) => f.dimension === 'FUEL_LEVEL_MOVEMENT');
+                                const details = fuelFactor?.details;
+                                return (
+                                  <>
+                                    <span className="font-bold text-emerald-600">
+                                      {details?.observedIncreasePercent !== undefined ? `+${Math.round(details.observedIncreasePercent)}%` : '—'}
+                                    </span>
+                                    <span className="text-[8px] text-slate-400 block font-sans mt-0.5">
+                                      {details ? `Stable reading ${Math.round(details.baselineFuelPercent)}% → ${Math.round(details.postFillFuelPercent)}%` : 'No sensor level logs'}
+                                    </span>
+                                  </>
+                                );
+                              })()}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* GPS window control */}
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-slate-700 dark:text-slate-350">GPS Time Window:</span>
+                        <select
+                          value={timeWindowMinutes}
+                          onChange={(e) => setTimeWindowMinutes(Number(e.target.value))}
+                          className="bg-slate-50 dark:bg-slate-800 border border-slate-250 dark:border-slate-700 rounded-lg px-2.5 py-1 text-2xs"
+                        >
+                          <option value={15}>±15 minutes</option>
+                          <option value={30}>±30 minutes (Default)</option>
+                          <option value={60}>±60 minutes</option>
+                          <option value={120}>±2 hours</option>
+                        </select>
+                      </div>
+
+                      {/* Timeline table */}
+                      <div className="space-y-1.5">
+                        <span className="font-bold text-[10px] text-slate-450 uppercase tracking-wider block">GPS log timeline</span>
+                        <div className="border border-slate-150 dark:border-slate-800 rounded-xl overflow-hidden max-h-36 overflow-y-auto">
+                          <table className="w-full text-left border-collapse text-3xs">
+                            <thead>
+                              <tr className="bg-slate-50 dark:bg-slate-850 text-slate-500 font-semibold border-b border-slate-150">
+                                <th className="p-1.5">Time</th>
+                                <th className="p-1.5">Address</th>
+                                <th className="p-1.5 text-right">Fuel</th>
+                                <th className="p-1.5 text-right">KM</th>
+                                <th className="p-1.5 text-right">Speed</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100 dark:divide-slate-850 font-mono">
+                              {selectedTxEvidence.pointsInWindow?.length === 0 ? (
+                                <tr>
+                                  <td colSpan={5} className="p-3 text-center text-slate-400">No logs in window.</td>
+                                </tr>
+                              ) : (
+                                selectedTxEvidence.pointsInWindow.map((pt: any, i: number) => (
+                                  <tr key={i} className="hover:bg-slate-50/50">
+                                    <td className="p-1.5 whitespace-nowrap">{new Date(pt.timestamp).toLocaleTimeString()}</td>
+                                    <td className="p-1.5 truncate max-w-[120px]" title={pt.locationAddress}>{pt.locationAddress || `${pt.latitude}, ${pt.longitude}`}</td>
+                                    <td className="p-1.5 text-right">{pt.fuelLevelPercent !== null ? `${Math.round(pt.fuelLevelPercent)}%` : '—'}</td>
+                                    <td className="p-1.5 text-right">{pt.odometerKm ?? '—'}</td>
+                                    <td className="p-1.5 text-right">{pt.speedKmh ?? '—'}</td>
+                                  </tr>
+                                ))
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      {/* Score explanation sentence */}
+                      <div className="p-3 bg-indigo-50/20 border border-indigo-150 dark:border-indigo-900/30 rounded-xl text-3xs leading-relaxed text-indigo-950 dark:text-indigo-300">
+                        <span className="font-extrabold block mb-0.5 uppercase tracking-wider text-[8px] text-indigo-500">Scoring Engine Explanation:</span>
+                        <p>{selectedTxEvidence.assessment?.friendlyReason || selectedTxEvidence.assessment?.factors?.[0]?.explanation || 'No confirmed match found. Vehicles registrations/times mismatch.'}</p>
+                      </div>
+
+                      {/* Auditor overrides notes & actions */}
+                      <div className="space-y-2 border-t border-slate-150 dark:border-slate-800 pt-3">
+                        <span className="font-bold text-[10px] text-slate-500 uppercase tracking-wider block">Auditor Override Decisions</span>
+                        <textarea
+                          value={selectedTransaction.reviewerNote || ''}
+                          placeholder="Provide audit override reason or mapping notes..."
+                          onChange={(e) => {
+                            const note = e.target.value;
+                            setSelectedTransaction({ ...selectedTransaction, reviewerNote: note });
+                          }}
+                          onBlur={(e) => {
+                            handleRowOverride(selectedTransaction.id, selectedTransaction.telematicsOverrideStatus || 'Review', e.target.value);
+                          }}
+                          className="w-full text-2xs p-2 bg-slate-50 dark:bg-slate-850 border border-slate-200 dark:border-slate-700 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 font-sans"
+                          rows={2}
+                        />
+                        <div className="flex gap-1.5 flex-wrap">
+                          <button
+                            onClick={() => handleRowOverride(selectedTransaction.id, 'Marked Supported', selectedTransaction.reviewerNote || 'Verified override')}
+                            className="py-1 px-2.5 bg-green-600 hover:bg-green-500 text-white rounded-lg text-3xs font-semibold"
+                          >
+                            Mark Supported
+                          </button>
+                          <button
+                            onClick={() => handleRowOverride(selectedTransaction.id, 'Flagged Mismatch', selectedTransaction.reviewerNote || 'Flagged issue')}
+                            className="py-1 px-2.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-3xs font-semibold"
+                          >
+                            Flag Issue
+                          </button>
+                          <button
+                            onClick={() => handleRowOverride(selectedTransaction.id, 'Needs Follow Up', selectedTransaction.reviewerNote || '')}
+                            className="py-1 px-2.5 bg-amber-500 hover:bg-amber-400 text-white rounded-lg text-3xs font-semibold"
+                          >
+                            Follow Up
+                          </button>
+                        </div>
+                      </div>
+
+                    </div>
+                  ) : null}
+
+                  {/* Advanced settings preview inside Step 4 */}
+                  {advancedMode && (
+                    <div className="bg-slate-50 dark:bg-slate-850 p-4 border border-slate-250 dark:border-slate-800 rounded-2xl space-y-3.5 text-2xs">
+                      <span className="font-black uppercase text-indigo-600 dark:text-indigo-400 tracking-wider flex items-center gap-1">
+                        <Settings className="w-3.5 h-3.5" />
+                        Advanced Scorer dials
+                      </span>
+                      <div className="space-y-2">
+                        <div>
+                          <label className="block text-slate-550 mb-0.5">Location Radius tolerance:</label>
+                          <select disabled className="w-full text-3xs p-1 bg-white border rounded">
+                            <option>5.0 km (Default) — Coming soon — not active yet</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-slate-550 mb-0.5">Timezone assumption:</label>
+                          <select disabled className="w-full text-3xs p-1 bg-white border rounded">
+                            <option>UTC (Default) — Coming soon — not active yet</option>
+                          </select>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex gap-2.5 pt-4 border-t border-slate-150 dark:border-slate-800">
+                  <button
+                    onClick={() => setActiveStep(5)}
+                    className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold shadow-md flex items-center justify-center gap-1 transition"
+                  >
+                    Continue to Approve / Flag <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* STEP 5: APPROVE / FLAG BATCH SIGN-OFF */}
+            {activeStep === 5 && (
+              <div className="space-y-4 animate-fade-in flex-1 flex flex-col justify-between">
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                    <span className="text-xs font-bold uppercase tracking-wider text-slate-450">
+                      Step 5: Batch Approval Sign-off
+                    </span>
+                    <span className="px-2.5 py-0.5 rounded text-3xs font-extrabold bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-400 border border-indigo-200/50 uppercase">
+                      {activeBatch.approvalStatus || 'draft'}
+                    </span>
+                  </div>
+
+                  {getUnresolvedBlockingIssuesCount() > 0 ? (
+                    <div className="p-3 bg-rose-50 dark:bg-rose-955/20 border border-rose-200/50 rounded-xl flex items-start gap-3">
+                      <AlertTriangle className="w-5 h-5 text-rose-500 shrink-0 mt-0.5" />
+                      <div className="text-2xs leading-normal">
+                        <span className="font-extrabold text-rose-800 block">
+                          Batch approval blocked — {getUnresolvedBlockingIssuesCount()} items remain
+                        </span>
+                        <p className="text-[11px] text-rose-600 mt-1 leading-normal">
+                          You cannot approve this invoice reconciliation run until all vehicle GPS logs are linked and warnings or parser exceptions are manually resolved/flagged with comments.
+                        </p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-3 bg-green-50 dark:bg-green-950/15 border border-green-200/50 rounded-xl flex items-start gap-3">
+                      <CheckCircle2 className="w-5 h-5 text-green-500 shrink-0 mt-0.5" />
+                      <div className="text-2xs leading-normal">
+                        <span className="font-extrabold text-green-800 block">
+                          Reconciliation check complete
+                        </span>
+                        <p className="text-[11px] text-green-600 mt-0.5">
+                          All invoiced vehicles are matched, totals verify, and exceptions are resolved. This run is ready to sign off.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Summary list */}
+                  <div className="border border-slate-150 dark:border-slate-800 rounded-xl overflow-hidden font-mono text-[10px] divide-y divide-slate-100 dark:divide-slate-850">
+                    <div className="flex justify-between p-2">
+                      <span className="text-slate-450 select-none">Total transactions:</span>
+                      <span className="font-bold text-slate-800 dark:text-slate-200">{transactions.length} rows</span>
+                    </div>
+                    <div className="flex justify-between p-2">
+                      <span className="text-slate-450 select-none">Vehicles checked:</span>
+                      <span className="font-bold text-slate-800 dark:text-slate-200">{activeBatch.vehicles.length} units</span>
+                    </div>
+                    <div className="flex justify-between p-2">
+                      <span className="text-slate-450 select-none">GPS Log coverage linked:</span>
+                      <span className="font-bold text-slate-800 dark:text-slate-200">{activeBatch.attachedGpsFiles?.length || 0} files</span>
+                    </div>
+                    <div className="flex justify-between p-2">
+                      <span className="text-slate-450 select-none">Supported / Likely supported:</span>
+                      <span className="text-green-600 font-bold">
+                        {transactions.filter(t => t.telematicsAssessment?.classification === 'VERIFIED' || t.telematicsAssessment?.classification === 'LIKELY' || t.telematicsOverrideStatus === 'Marked Supported').length}
+                      </span>
+                    </div>
+                    <div className="flex justify-between p-2">
+                      <span className="text-slate-450 select-none">Manual overrides / notes added:</span>
+                      <span className="text-indigo-600 font-bold">
+                        {transactions.filter(t => t.telematicsOverrideStatus).length} rows
+                      </span>
                     </div>
                   </div>
 
+                  {/* Reviewer Note area */}
+                  <div className="space-y-1">
+                    <span className="text-2xs font-bold text-slate-700 dark:text-slate-300">Auditor Sign-off Notes:</span>
+                    <textarea
+                      value={activeBatch.reviewerNotes || ''}
+                      placeholder="Add final compliance sign-off remarks, exception logs, or reviewer details..."
+                      onChange={(e) => setActiveBatch({ ...activeBatch, reviewerNotes: e.target.value })}
+                      onBlur={(e) => updateApprovalStatus(activeBatch.approvalStatus || 'draft', e.target.value)}
+                      className="w-full text-2xs p-2.5 bg-slate-50 dark:bg-slate-855 border border-slate-200 dark:border-slate-800 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500 font-sans"
+                      rows={2}
+                    />
+                    <span className="text-[9px] text-slate-400 block select-none">Auto-saves when focus moves away.</span>
+                  </div>
+
+                  {/* Audit History Log */}
+                  <div className="space-y-1.5">
+                    <span className="text-2xs font-bold text-slate-750 dark:text-slate-350 block">Audit Trail transitions log</span>
+                    <div className="max-h-[140px] overflow-y-auto border border-slate-150 dark:border-slate-800 rounded-xl p-2 bg-slate-50/50 dark:bg-slate-900/40 text-[9px] divide-y divide-slate-100 dark:divide-slate-850">
+                      {!activeBatch.auditHistory || activeBatch.auditHistory.length === 0 ? (
+                        <div className="text-slate-400 py-1.5 text-center">No audit logs recorded. Status transitions log automatically.</div>
+                      ) : (
+                        activeBatch.auditHistory.map((item, idx) => (
+                          <div key={idx} className="py-1.5 flex justify-between gap-2 first:pt-0 last:pb-0">
+                            <div>
+                              <span className="font-semibold text-slate-700 dark:text-slate-300 block">{item.details}</span>
+                              <span className="text-[8px] text-slate-450 mt-0.5">Auditor: {item.user}</span>
+                            </div>
+                            <span className="text-slate-400 whitespace-nowrap font-mono">{new Date(item.timestamp).toLocaleTimeString()}</span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex gap-2 pt-4 border-t border-slate-150 dark:border-slate-800">
+                  <button
+                    disabled={getUnresolvedBlockingIssuesCount() > 0}
+                    onClick={handleConfirmBatch}
+                    className="flex-1 py-2.5 bg-green-600 hover:bg-green-500 disabled:opacity-40 text-white rounded-xl text-xs font-semibold shadow-md flex items-center justify-center gap-1 transition-colors"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    Approve Invoice
+                  </button>
+                  <button
+                    onClick={() => updateApprovalStatus('needs_review')}
+                    className="py-2.5 px-4 bg-amber-500 hover:bg-amber-400 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-1 transition-colors"
+                  >
+                    Flag review
+                  </button>
+                  <button
+                    onClick={() => updateApprovalStatus('rejected')}
+                    className="py-2.5 px-4 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-1 transition-colors"
+                  >
+                    Reject
+                  </button>
                 </div>
               </div>
             )}
@@ -1271,15 +1517,222 @@ function BatchesPageContent() {
         </div>
       )}
 
-      {/* Popovers / Panels Modals */}
+      {/* ─── INLINE EDIT TRANSACTION POPUP DIALOG ─── */}
+      {editingTransaction && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 dark:bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
+          <div className="w-full max-w-[650px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl rounded-2xl p-5 space-y-4 max-h-[92vh] overflow-y-auto animate-zoom-in">
+            <div className="flex justify-between items-center border-b border-slate-150 dark:border-slate-850 pb-2">
+              <span className="text-sm font-extrabold text-slate-900 dark:text-white flex items-center gap-1.5">
+                <PenTool className="w-5 h-5 text-indigo-600" />
+                Edit extracted transaction fields
+              </span>
+              <button
+                onClick={() => setEditingTransaction(null)}
+                className="p-1 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 rounded-lg"
+              >
+                <XCircle className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              
+              <div className="space-y-1">
+                <label className="block text-slate-500 font-semibold uppercase tracking-wider text-[10px]">Vehicle Registration:</label>
+                <input
+                  type="text"
+                  value={editForm.registration}
+                  onChange={(e) => setEditForm({ ...editForm, registration: e.target.value })}
+                  className="w-full p-2 border border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50 font-mono text-[11px]"
+                />
+                {editingTransaction.originalValues?.registration !== undefined && (
+                  <span className="text-[10px] text-indigo-600 block">Original: {editingTransaction.originalValues.registration}</span>
+                )}
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-slate-500 font-semibold uppercase tracking-wider text-[10px]">Product / Item category:</label>
+                <input
+                  type="text"
+                  value={editForm.productName}
+                  onChange={(e) => setEditForm({ ...editForm, productName: e.target.value })}
+                  className="w-full p-2 border border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50"
+                />
+                {editingTransaction.originalValues?.productName !== undefined && (
+                  <span className="text-[10px] text-indigo-600 block">Original: {editingTransaction.originalValues.productName}</span>
+                )}
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-slate-500 font-semibold uppercase tracking-wider text-[10px]">Station City:</label>
+                <input
+                  type="text"
+                  value={editForm.stationCity}
+                  onChange={(e) => setEditForm({ ...editForm, stationCity: e.target.value })}
+                  className="w-full p-2 border border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50"
+                />
+                {editingTransaction.originalValues?.stationCity !== undefined && (
+                  <span className="text-[10px] text-indigo-600 block">Original: {editingTransaction.originalValues.stationCity}</span>
+                )}
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-slate-500 font-semibold uppercase tracking-wider text-[10px]">Station / Forecourt Name:</label>
+                <input
+                  type="text"
+                  value={editForm.stationName}
+                  onChange={(e) => setEditForm({ ...editForm, stationName: e.target.value })}
+                  className="w-full p-2 border border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50"
+                />
+                {editingTransaction.originalValues?.stationName !== undefined && (
+                  <span className="text-[10px] text-indigo-600 block">Original: {editingTransaction.originalValues.stationName}</span>
+                )}
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-slate-500 font-semibold uppercase tracking-wider text-[10px]">Date (YYYY-MM-DD):</label>
+                <input
+                  type="text"
+                  value={editForm.transactionDate}
+                  onChange={(e) => setEditForm({ ...editForm, transactionDate: e.target.value })}
+                  className="w-full p-2 border border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50 font-mono text-[11px]"
+                />
+                {editingTransaction.originalValues?.transactionDate !== undefined && (
+                  <span className="text-[10px] text-indigo-600 block">Original: {editingTransaction.originalValues.transactionDate}</span>
+                )}
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-slate-500 font-semibold uppercase tracking-wider text-[10px]">Timestamp (Local/ISO):</label>
+                <input
+                  type="text"
+                  value={editForm.transactionTimestamp}
+                  onChange={(e) => setEditForm({ ...editForm, transactionTimestamp: e.target.value })}
+                  className="w-full p-2 border border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50 font-mono text-[11px]"
+                />
+                {editingTransaction.originalValues?.transactionTimestamp !== undefined && (
+                  <span className="text-[10px] text-indigo-600 block">Original: {editingTransaction.originalValues.transactionTimestamp}</span>
+                )}
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-slate-500 font-semibold uppercase tracking-wider text-[10px]">Quantity / Volumetric litres:</label>
+                <input
+                  type="text"
+                  value={editForm.quantity}
+                  onChange={(e) => setEditForm({ ...editForm, quantity: e.target.value })}
+                  className="w-full p-2 border border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50 font-mono text-[11px]"
+                />
+                {editingTransaction.originalValues?.quantity !== undefined && (
+                  <span className="text-[10px] text-indigo-600 block">Original: {editingTransaction.originalValues.quantity}</span>
+                )}
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-slate-500 font-semibold uppercase tracking-wider text-[10px]">Total Net amount:</label>
+                <input
+                  type="text"
+                  value={editForm.baseValueNet}
+                  onChange={(e) => setEditForm({ ...editForm, baseValueNet: e.target.value })}
+                  className="w-full p-2 border border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50 font-mono text-[11px]"
+                />
+                {editingTransaction.originalValues?.baseValueNet !== undefined && (
+                  <span className="text-[10px] text-indigo-600 block">Original: {editingTransaction.originalValues.baseValueNet}</span>
+                )}
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-slate-500 font-semibold uppercase tracking-wider text-[10px]">Discount net value:</label>
+                <input
+                  type="text"
+                  value={editForm.discountNet}
+                  onChange={(e) => setEditForm({ ...editForm, discountNet: e.target.value })}
+                  className="w-full p-2 border border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50 font-mono text-[11px]"
+                />
+                {editingTransaction.originalValues?.discountNet !== undefined && (
+                  <span className="text-[10px] text-indigo-600 block">Original: {editingTransaction.originalValues.discountNet}</span>
+                )}
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-slate-500 font-semibold uppercase tracking-wider text-[10px]">VAT value:</label>
+                <input
+                  type="text"
+                  value={editForm.vat}
+                  onChange={(e) => setEditForm({ ...editForm, vat: e.target.value })}
+                  className="w-full p-2 border border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50 font-mono text-[11px]"
+                />
+                {editingTransaction.originalValues?.vat !== undefined && (
+                  <span className="text-[10px] text-indigo-600 block">Original: {editingTransaction.originalValues.vat}</span>
+                )}
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-slate-500 font-semibold uppercase tracking-wider text-[10px]">Gross / Billing amount:</label>
+                <input
+                  type="text"
+                  value={editForm.valueInPayCurrency}
+                  onChange={(e) => setEditForm({ ...editForm, valueInPayCurrency: e.target.value })}
+                  className="w-full p-2 border border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50 font-mono text-[11px]"
+                />
+                {editingTransaction.originalValues?.valueInPayCurrency !== undefined && (
+                  <span className="text-[10px] text-indigo-600 block">Original: {editingTransaction.originalValues.valueInPayCurrency}</span>
+                )}
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-slate-500 font-semibold uppercase tracking-wider text-[10px]">Billing Currency:</label>
+                <input
+                  type="text"
+                  value={editForm.paymentCurrency}
+                  onChange={(e) => setEditForm({ ...editForm, paymentCurrency: e.target.value })}
+                  className="w-full p-2 border border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50 font-mono text-[11px]"
+                />
+              </div>
+
+            </div>
+
+            <div className="flex gap-2 pt-4 border-t border-slate-150 dark:border-slate-850">
+              <button
+                onClick={handleSaveEdit}
+                disabled={recomputingRowId !== null}
+                className="btn btn-primary flex-1 py-2 text-xs font-semibold flex items-center justify-center gap-1.5"
+              >
+                {recomputingRowId === editingTransaction.id ? (
+                  <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Recalculating scores...</>
+                ) : (
+                  <>Save corrected fields</>
+                )}
+              </button>
+              
+              {editingTransaction.isManuallyEdited && (
+                <button
+                  onClick={() => handleRevertRow(editingTransaction.id)}
+                  disabled={recomputingRowId !== null}
+                  className="py-2 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-800 dark:hover:bg-slate-750 dark:text-slate-350 border border-slate-200 dark:border-slate-750 rounded-xl text-xs font-semibold flex items-center gap-1"
+                >
+                  <Undo className="w-4 h-4" />
+                  Revert to Extracted
+                </button>
+              )}
+
+              <button
+                onClick={() => setEditingTransaction(null)}
+                className="py-2 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-800 dark:hover:bg-slate-750 dark:text-slate-350 border border-slate-200 dark:border-slate-750 rounded-xl text-xs font-semibold"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── E2E COMPATIBILITY BACKWARD MODALS ─── */}
       {selectedTxForSource && (
         <SourceViewerPanel
           isOpen={true}
           onClose={() => setSelectedTxForSource(null)}
           evidence={selectedTxForSource.sourceEvidence}
           transaction={selectedTxForSource}
-          onPrev={() => navigateTx('prev', selectedTxForSource.id, setSelectedTxForSource)}
-          onNext={() => navigateTx('next', selectedTxForSource.id, setSelectedTxForSource)}
         />
       )}
 
@@ -1288,8 +1741,6 @@ function BatchesPageContent() {
           isOpen={true}
           onClose={() => setSelectedTxForMatch(null)}
           transactionId={selectedTxForMatch.id}
-          onPrev={() => navigateTx('prev', selectedTxForMatch.id, setSelectedTxForMatch)}
-          onNext={() => navigateTx('next', selectedTxForMatch.id, setSelectedTxForMatch)}
         />
       )}
 
@@ -1299,13 +1750,12 @@ function BatchesPageContent() {
 
 export default function BatchesPage() {
   return (
-    <React.Suspense fallback={
-      <div className="py-16 flex flex-col items-center justify-center gap-3">
-        <Loader2 className="w-8 h-8 text-indigo-500 animate-spin" />
-        <span className="text-xs text-gray-500 font-medium">Loading review workspace...</span>
+    <Suspense fallback={
+      <div className="flex items-center justify-center min-h-[50vh]">
+        <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-indigo-600"></div>
       </div>
     }>
       <BatchesPageContent />
-    </React.Suspense>
+    </Suspense>
   );
 }

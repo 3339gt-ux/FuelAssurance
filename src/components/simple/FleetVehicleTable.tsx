@@ -23,7 +23,7 @@ function litresFor(row: VehicleRow, key: string): string {
   const match = entries.find(([prod]) => prod.toLowerCase().includes(key));
   if (!match) return '—';
   const val = match[1];
-  return val > 0 ? `${val.toFixed(1)}L` : '—';
+  return val > 0 ? `${val.toFixed(2)} L` : '—';
 }
 
 function otherCount(row: VehicleRow): string {

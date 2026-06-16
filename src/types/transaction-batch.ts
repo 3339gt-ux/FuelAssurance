@@ -4,8 +4,8 @@
 
 export type TransactionSourceType =
   | 'AS24 Invoice PDF'
-  | 'DKV Daily Transactions'
-  | 'DKV Invoice-Period Transactions'
+  | 'DKV Daily Transaction Excel'
+  | 'DKV Invoice-Period Excel'
   | 'DKV Invoice PDF'
   | 'GPS / Telematics';
 

@@ -13,6 +13,8 @@ import type {
   SourceDetectionInfo,
   TransactionSourceType,
 } from '@/types/upload';
+import { FleetVehicleTable } from '@/components/simple/FleetVehicleTable';
+import { FLEET_VEHICLES } from '@/config/fleet-registry';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Inline error panel — replaces all alert() calls
@@ -447,33 +449,10 @@ export default function DKVCheckPage() {
                   {uploadSummary.fleetVehiclesFound.length > 0 && (
                     <div className="space-y-3">
                       <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Fleet Vehicles Identified</h4>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        {uploadSummary.fleetVehiclesFound.map((v, idx) => (
-                          <div key={idx} className="card p-4 space-y-3 border-l-4 border-l-brand-600">
-                            <div className="flex justify-between items-start">
-                              <div>
-                                <span className="text-xs font-black font-mono tracking-tight bg-slate-100 dark:bg-surface-200 px-2 py-0.5 rounded text-slate-800 dark:text-surface-950">{v.registration}</span>
-                                <p className="text-3xs text-slate-400 mt-1">{v.make} {v.model}</p>
-                              </div>
-                              <span className="badge bg-brand-500/10 text-brand-600 text-3xs font-semibold">{v.chargeCount} charges</span>
-                            </div>
-                            <div className="grid grid-cols-2 gap-y-2 gap-x-4 text-3xs text-slate-500">
-                              <div>
-                                <span className="block text-4xs font-bold text-slate-400 uppercase">Litres</span>
-                                <span className="text-slate-800 font-medium">{Object.entries(v.fuelLitresByProduct).map(([p, l]) => `${l}L (${p})`).join(', ') || '0L'}</span>
-                              </div>
-                              <div>
-                                <span className="block text-4xs font-bold text-slate-400 uppercase">Monetary Total</span>
-                                <span className="text-slate-800 font-bold font-mono">{Object.entries(v.monetaryTotalsByCurrency).map(([c, a]: any) => `${c} ${a.toFixed(2)}`).join(', ')}</span>
-                              </div>
-                              <div className="col-span-2">
-                                <span className="block text-4xs font-bold text-slate-400 uppercase">Countries / Regions</span>
-                                <span className="text-slate-700 truncate block">{v.countries.join(', ')} ({v.stations.length} stations)</span>
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
+                      <FleetVehicleTable
+                        vehicles={uploadSummary.fleetVehiclesFound}
+                        allFleetRegistrations={FLEET_VEHICLES.map((v) => v.registration)}
+                      />
                     </div>
                   )}
 

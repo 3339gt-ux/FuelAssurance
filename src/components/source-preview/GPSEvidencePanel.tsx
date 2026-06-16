@@ -159,7 +159,7 @@ export default function GPSEvidencePanel({ transactionId }: GPSEvidencePanelProp
                   <span className="text-gray-500">Expected (from Invoice):</span>
                   <span className="font-semibold text-gray-800 dark:text-white">
                     +{Math.round((parseFloat(transaction.quantity || '0') / 1200) * 100)}% (
-                    {parseFloat(transaction.quantity || '0').toFixed(1)}L)
+                    {parseFloat(transaction.quantity || '0').toFixed(2)} L)
                   </span>
                 </div>
                 <div className="flex justify-between">

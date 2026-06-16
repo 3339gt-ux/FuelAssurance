@@ -111,7 +111,7 @@ test.describe('New Audit Workspace and DKV PDF Ingest features', () => {
     await expect(docBtn).toBeVisible();
     
     // 10. Open Evidence Match View
-    await row.click();
+    await row.locator('td').first().click();
     const evidenceMatchBtn = page.locator('button', { hasText: 'Evidence Match' }).first();
     await expect(evidenceMatchBtn).toBeVisible();
     await evidenceMatchBtn.click();

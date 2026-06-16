@@ -131,7 +131,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const cached = getCachedParse(hash, CURRENT_PARSER_VERSION);
   if (cached) {
     const batch = db.find('transaction_batches', (b: any) => b.id === cached.fileId);
-    const resolvedSourceType = batch?.sourceType || (cached.provider === 'AS24' ? 'AS24 Invoice PDF' : cached.provider === 'DKV' ? (isPDF ? 'DKV Invoice PDF' : cached.documentType === 'TRANSACTION' ? 'DKV Daily Transactions' : 'DKV Invoice-Period Transactions') : 'DKV Invoice-Period Transactions');
+    const resolvedSourceType = batch?.sourceType || (cached.provider === 'AS24' ? 'AS24 Invoice PDF' : cached.provider === 'DKV' ? (isPDF ? 'DKV Invoice PDF' : cached.documentType === 'TRANSACTION' ? 'DKV Daily Transaction Excel' : 'DKV Invoice-Period Excel') : 'DKV Invoice-Period Excel');
 
     return NextResponse.json({
       success: true,
@@ -155,7 +155,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const resolvedProvider = existingFile.provider || provider;
     const resolvedDocType = existingFile.document_type || documentType;
     const batch = db.find('transaction_batches', (b: any) => b.id === existingFile.id);
-    const resolvedSourceType = batch?.sourceType || (resolvedProvider === 'AS24' ? 'AS24 Invoice PDF' : resolvedProvider === 'DKV' ? (existingFile.file_name?.toLowerCase().endsWith('.pdf') || isPDF ? 'DKV Invoice PDF' : resolvedDocType === 'TRANSACTION' ? 'DKV Daily Transactions' : 'DKV Invoice-Period Transactions') : 'DKV Invoice-Period Transactions');
+    const resolvedSourceType = batch?.sourceType || (resolvedProvider === 'AS24' ? 'AS24 Invoice PDF' : resolvedProvider === 'DKV' ? (existingFile.file_name?.toLowerCase().endsWith('.pdf') || isPDF ? 'DKV Invoice PDF' : resolvedDocType === 'TRANSACTION' ? 'DKV Daily Transaction Excel' : 'DKV Invoice-Period Excel') : 'DKV Invoice-Period Excel');
 
     return NextResponse.json({
       success: true,
@@ -604,8 +604,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         (provider === 'AS24'
           ? 'AS24 Invoice PDF'
           : documentType === 'TRANSACTION'
-            ? 'DKV Daily Transactions'
-            : 'DKV Invoice-Period Transactions');
+            ? 'DKV Daily Transaction Excel'
+            : 'DKV Invoice-Period Excel');
 
       createTransactionBatch({
         batchId: fileId,
@@ -645,8 +645,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       ? 'AS24 Invoice PDF'
       : provider === 'DKV'
         ? documentType === 'TRANSACTION'
-          ? 'DKV Daily Transactions'
-          : 'DKV Invoice-Period Transactions'
+          ? 'DKV Daily Transaction Excel'
+          : 'DKV Invoice-Period Excel'
         : undefined);
 
   const successBody: UploadResponse = {

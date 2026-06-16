@@ -77,7 +77,7 @@ function detectSpreadsheetSource(rows: unknown[][]): SourceDetectionCandidate[] 
 
   if (invoiceMarkers >= 2 || (nonEmptyCols >= 28 && dkvInvoiceScore >= 0.25)) {
     candidates.push({
-      sourceType: 'DKV Invoice-Period Transactions',
+      sourceType: 'DKV Invoice-Period Excel',
       confidence: Math.min(0.98, 0.55 + invoiceMarkers * 0.1 + dkvInvoiceScore * 0.2),
       reason: `Invoice-period structure: ${nonEmptyCols} columns, invoice/base-value headers detected (${invoiceMarkers} markers).`,
     });
@@ -85,7 +85,7 @@ function detectSpreadsheetSource(rows: unknown[][]): SourceDetectionCandidate[] 
 
   if (dailyMarkers >= 2 || (nonEmptyCols >= 10 && nonEmptyCols <= 24 && dkvDailyScore >= 0.3)) {
     candidates.push({
-      sourceType: 'DKV Daily Transactions',
+      sourceType: 'DKV Daily Transaction Excel',
       confidence: Math.min(0.95, 0.5 + dailyMarkers * 0.12 + dkvDailyScore * 0.2),
       reason: `Daily/authorisation structure: ${nonEmptyCols} columns, auth-time/response headers detected (${dailyMarkers} markers).`,
     });
@@ -126,7 +126,7 @@ async function detectPdfSource(buffer: Buffer): Promise<SourceDetectionCandidate
     }
     if (text.includes('dkv') && (text.includes('invoice') || text.includes('transaction'))) {
       return [{
-        sourceType: 'DKV Invoice-Period Transactions',
+        sourceType: 'DKV Invoice-Period Excel',
         confidence: 0.4,
         reason: 'PDF mentions DKV invoice/transaction but AS24 markers absent — confirm manually.',
       }];
@@ -143,9 +143,9 @@ export function mapSourceTypeToProvider(
   switch (sourceType) {
     case 'AS24 Invoice PDF':
       return { provider: 'AS24', documentType: 'INVOICE' };
-    case 'DKV Daily Transactions':
+    case 'DKV Daily Transaction Excel':
       return { provider: 'DKV', documentType: 'TRANSACTION' };
-    case 'DKV Invoice-Period Transactions':
+    case 'DKV Invoice-Period Excel':
       return { provider: 'DKV', documentType: 'INVOICE' };
     case 'DKV Invoice PDF':
       return { provider: 'DKV', documentType: 'INVOICE' };
@@ -159,8 +159,10 @@ export function mapSourceTypeToProvider(
 export function mapLegacyTypeToSourceType(type: string): TransactionSourceType | null {
   const map: Record<string, TransactionSourceType> = {
     'AS24 Invoice (PDF)': 'AS24 Invoice PDF',
-    'DKV Transactions': 'DKV Daily Transactions',
-    'DKV Invoice': 'DKV Invoice-Period Transactions',
+    'DKV Transactions': 'DKV Daily Transaction Excel',
+    'DKV Invoice': 'DKV Invoice-Period Excel',
+    'DKV Daily Transaction Excel': 'DKV Daily Transaction Excel',
+    'DKV Invoice-Period Excel': 'DKV Invoice-Period Excel',
     'DKV Invoice (PDF)': 'DKV Invoice PDF',
     'GPS / Telematics': 'GPS / Telematics',
   };

@@ -252,7 +252,7 @@ export default function CompactTransactionTable({
                         {tx.stationCity || tx.stationName || '—'}
                       </td>
                       <td className="px-3 py-2 text-right font-mono font-semibold">
-                        {parseFloat(tx.quantity || tx.volume || '0').toFixed(1)}{' '}
+                        {parseFloat(tx.quantity || tx.volume || '0').toFixed(2)}{' '}
                         <span className="text-[10px] text-gray-400 font-normal">
                           {tx.unit || tx.volumeUnit || 'L'}
                         </span>
@@ -270,15 +270,23 @@ export default function CompactTransactionTable({
                           '—'
                         )}
                       </td>
-                      <td className="px-3 py-2 text-center" onClick={(e) => { e.stopPropagation(); onOpenEvidenceMatchView(tx); }}>
+                      <td className="px-3 py-2 text-center">
                         {hasGps && tx.status !== 'PARSER_MAPPING_ERROR' ? (
                           <div className="flex flex-col gap-0.5 items-center">
-                            <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold cursor-pointer hover:opacity-85 ${
-                              getGpsStatusBadge(tx.telematicsAssessment?.classification || 'INSUFFICIENT_EVIDENCE')
-                            }`}>
+                            <span
+                              onClick={(e) => { e.stopPropagation(); onOpenEvidenceMatchView(tx); }}
+                              className={`px-2 py-0.5 rounded-full text-[9px] font-bold cursor-pointer hover:opacity-85 ${
+                                getGpsStatusBadge(tx.telematicsAssessment?.classification || 'INSUFFICIENT_EVIDENCE')
+                              }`}
+                            >
                               {tx.telematicsAssessment?.classification || 'NO GPS'}
                             </span>
-                            <span className="text-[8px] text-indigo-500 hover:underline">Compare</span>
+                            <span
+                              onClick={(e) => { e.stopPropagation(); onOpenEvidenceMatchView(tx); }}
+                              className="text-[8px] text-indigo-500 hover:underline cursor-pointer"
+                            >
+                              Compare
+                            </span>
                           </div>
                         ) : (
                           <span className="text-gray-400 text-[10px]">--</span>
