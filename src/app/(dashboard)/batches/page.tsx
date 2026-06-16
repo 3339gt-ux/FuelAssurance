@@ -43,6 +43,7 @@ import SourceViewerPanel from '@/components/source-preview/SourceViewerPanel';
 import EvidenceMatchView from '@/components/source-preview/EvidenceMatchView';
 import PDFPageRenderer from '@/components/source-preview/PDFPageRenderer';
 import { normalizeRegistration } from '@/config/fleet-registry';
+import { groupWarnings } from '@/lib/warning-grouper';
 
 interface GPSAttachment {
   fileName: string;
@@ -134,6 +135,8 @@ function BatchesPageContent() {
   // Global modes
   const [density, setDensity] = useState<'compact' | 'comfortable'>('compact');
   const [advancedMode, setAdvancedMode] = useState<boolean>(false);
+  const [showGuide, setShowGuide] = useState<boolean>(true);
+  const [showFullGpsSource, setShowFullGpsSource] = useState<boolean>(false);
 
   // Modals for E2E tests
   const [selectedTxForSource, setSelectedTxForSource] = useState<any | null>(null);
@@ -148,7 +151,17 @@ function BatchesPageContent() {
 
     const adv = localStorage.getItem('fuel-assurance-advanced-mode') === 'true';
     setAdvancedMode(adv);
+
+    const guideDismissed = localStorage.getItem('fuel-assurance-dismiss-guide') === 'true';
+    if (guideDismissed) {
+      setShowGuide(false);
+    }
   }, []);
+
+  const handleDismissGuide = () => {
+    setShowGuide(false);
+    localStorage.setItem('fuel-assurance-dismiss-guide', 'true');
+  };
 
   const toggleDensity = () => {
     const newMode = density === 'compact' ? 'comfortable' : 'compact';
@@ -719,6 +732,29 @@ function BatchesPageContent() {
         </div>
       )}
 
+      {activeBatch && showGuide && (
+        <div className="bg-indigo-50 dark:bg-indigo-950/45 border border-indigo-150 dark:border-indigo-800/40 rounded-2xl p-3 px-4 flex items-start justify-between gap-3 text-xs leading-normal animate-fade-in shadow-sm">
+          <div className="flex gap-2">
+            <Info className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-extrabold text-indigo-950 dark:text-indigo-300">What to do next:</span>
+              <ol className="list-decimal pl-4 mt-0.5 space-y-0.5 text-indigo-900/90 dark:text-indigo-350 text-[11px]">
+                <li>Check the extracted transactions in the list on the left.</li>
+                <li>Upload GPS files for the vehicles under Step 3 (Upload GPS).</li>
+                <li>Click <strong>Compare</strong> (or click a row) on rows needing review to check proximity evidence.</li>
+                <li>Approve the invoice when all issues are resolved.</li>
+              </ol>
+            </div>
+          </div>
+          <button
+            onClick={handleDismissGuide}
+            className="text-[10px] font-bold text-indigo-600 hover:text-indigo-700 dark:text-indigo-400 dark:hover:text-indigo-300 shrink-0"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* ─── STEP 1: UPLOAD INVOICE (NO BATCH SELECTED) ─── */}
       {activeStep === 1 && !selectedBatchId && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -845,10 +881,10 @@ function BatchesPageContent() {
 
       {/* ─── CORE WORKSPACE LAYOUT (LEFT/RIGHT SPLIT) ─── */}
       {activeBatch && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
           
           {/* ───────────────── LEFT PANEL: INVOICED TRANSACTIONS ───────────────── */}
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm p-4 flex flex-col gap-4 overflow-hidden min-h-[75vh]">
+          <div className="lg:col-span-7 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm p-4 flex flex-col gap-4 overflow-hidden min-h-[75vh]">
             <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
               <span className="text-xs font-bold uppercase tracking-wider text-slate-450 flex items-center gap-1">
                 <ClipboardList className="w-4 h-4 text-indigo-500" />
@@ -869,6 +905,10 @@ function BatchesPageContent() {
                   setActiveStep(4); // navigate to comparison step
                 }}
                 selectedVehicle={selectedTransaction?.registration}
+                advancedMode={advancedMode}
+                onSelectTransaction={setSelectedTransaction}
+                onOpenEdit={handleOpenEdit}
+                onRevertEdit={handleRevertRow}
               />
             </div>
 
@@ -914,7 +954,75 @@ function BatchesPageContent() {
           </div>
 
           {/* ───────────────── RIGHT PANEL: DYNAMIC STEPS ───────────────── */}
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm p-4 flex flex-col gap-4 overflow-hidden min-h-[75vh]">
+          <div className="lg:col-span-5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm p-4 flex flex-col gap-4 overflow-hidden min-h-[75vh]">
+            
+            {/* Reconciliation & Approval Status Widget */}
+            <div className="bg-slate-50 dark:bg-slate-850 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 space-y-3.5 shadow-sm shrink-0">
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] font-black uppercase text-slate-450 tracking-wider">Approval status</span>
+                <span className={`px-2.5 py-0.5 rounded text-[10px] font-extrabold uppercase ${
+                  getUnresolvedBlockingIssuesCount() > 0 
+                    ? 'bg-rose-100 text-rose-800 dark:bg-rose-950/30 dark:text-rose-400 font-sans' 
+                    : 'bg-green-100 text-green-800 dark:bg-green-950/30 dark:text-green-400 font-sans'
+                }`}>
+                  {getUnresolvedBlockingIssuesCount() > 0 ? 'Not ready' : 'Ready to approve'}
+                </span>
+              </div>
+              
+              <div className="grid grid-cols-3 gap-2.5 text-center font-mono select-none">
+                <div className="bg-slate-50 dark:bg-slate-900 border border-slate-150 dark:border-slate-800 rounded-xl p-2">
+                  <span className="text-[8px] text-slate-400 block uppercase font-sans font-bold">Need review</span>
+                  <span className="text-sm font-extrabold text-amber-600 block mt-0.5">{getUnresolvedBlockingIssuesCount()}</span>
+                </div>
+                <div className="bg-slate-50 dark:bg-slate-900 border border-slate-150 dark:border-slate-800 rounded-xl p-2">
+                  <span className="text-[8px] text-slate-400 block uppercase font-sans font-bold">Approved</span>
+                  <span className="text-sm font-extrabold text-green-600 block mt-0.5">
+                    {transactions.filter(t => t.telematicsOverrideStatus === 'Marked Supported').length}
+                  </span>
+                </div>
+                <div className="bg-slate-50 dark:bg-slate-900 border border-slate-150 dark:border-slate-800 rounded-xl p-2">
+                  <span className="text-[8px] text-slate-400 block uppercase font-sans font-bold">Flagged</span>
+                  <span className="text-sm font-extrabold text-rose-600 block mt-0.5">
+                    {transactions.filter(t => t.telematicsOverrideStatus === 'Flagged Mismatch').length}
+                  </span>
+                </div>
+              </div>
+              
+              {getUnresolvedBlockingIssuesCount() > 0 ? (
+                <div className="p-2.5 bg-rose-500/5 border border-rose-200/50 rounded-xl text-rose-700 dark:text-rose-400 text-[10px] leading-relaxed">
+                  <strong>Approval blocked:</strong> Resolve or override the {getUnresolvedBlockingIssuesCount()} unresolved item{getUnresolvedBlockingIssuesCount() === 1 ? '' : 's'} before approving this run.
+                </div>
+              ) : null}
+              
+              <div className="flex gap-2 flex-wrap">
+                <button
+                  onClick={() => setActiveStep(4)}
+                  className="flex-1 py-1.5 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/30 dark:hover:bg-indigo-950/60 border border-indigo-200/50 text-indigo-750 dark:text-indigo-400 rounded-xl text-2xs font-bold transition"
+                >
+                  Review issues
+                </button>
+                <button
+                  onClick={() => setActiveStep(5)}
+                  disabled={getUnresolvedBlockingIssuesCount() > 0}
+                  className="flex-1 py-1.5 bg-green-605 hover:bg-green-500 disabled:opacity-40 text-white rounded-xl text-2xs font-bold transition"
+                >
+                  Approve invoice
+                </button>
+                <button
+                  onClick={() => setActiveStep(5)}
+                  className="py-1.5 px-3 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-2xs font-bold transition"
+                >
+                  Flag invoice
+                </button>
+                <button
+                  onClick={handleExportCSV}
+                  className="py-1.5 px-3 bg-slate-100 hover:bg-slate-205 dark:bg-slate-800 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-750 text-slate-750 dark:text-slate-300 rounded-xl text-2xs font-bold transition"
+                  title="Export CSV report"
+                >
+                  Export report
+                </button>
+              </div>
+            </div>
             
             {/* STEP 2: REVIEW EXTRACTION DETAILS */}
             {activeStep === 2 && (
@@ -929,17 +1037,104 @@ function BatchesPageContent() {
                     </span>
                   </div>
 
-                  {activeBatch.parsingWarnings && activeBatch.parsingWarnings.length > 0 && (
-                    <div className="p-3 bg-amber-500/5 border border-amber-250 rounded-xl text-amber-700 dark:text-amber-400 text-xs">
-                      <span className="font-bold flex items-center gap-1 mb-1">
-                        <AlertTriangle className="w-4 h-4 shrink-0" />
-                        Parser Warnings Detected
-                      </span>
-                      <ul className="list-disc pl-4 space-y-0.5 text-3xs">
-                        {activeBatch.parsingWarnings.map((w, i) => <li key={i}>{w}</li>)}
-                      </ul>
-                    </div>
-                  )}
+                  {(() => {
+                    const allRawWarnings = [
+                      ...(activeBatch.parsingWarnings || []),
+                      ...transactions.flatMap(t => t.warnings || [])
+                    ];
+                    
+                    if (allRawWarnings.length === 0) return null;
+                    
+                    const grouped = groupWarnings(allRawWarnings);
+                    const allGroupedWarnings = [
+                      ...grouped.blocking,
+                      ...grouped.review,
+                      ...grouped.informational
+                    ];
+                    
+                    return (
+                      <div className="space-y-2.5">
+                        <span className="text-xs font-bold text-slate-700 dark:text-slate-350 flex items-center gap-1">
+                          <AlertTriangle className="w-4 h-4 text-amber-500" />
+                          Grouped Extraction & Parser Warnings ({allRawWarnings.length})
+                        </span>
+                        <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
+                          {allGroupedWarnings.map((g, idx) => {
+                            const isBlocking = g.level === 'blocking';
+                            const isReview = g.level === 'review';
+                            
+                            // Map technical code to user friendly plain English if advancedMode is off
+                            let friendlyMessage = g.message;
+                            if (!advancedMode) {
+                              if (g.code === 'TOLL_NET_NOT_PROVIDED') {
+                                friendlyMessage = 'Toll rows did not include a separate payment net value.';
+                              } else if (g.code === 'PARSER_MAPPING_ERROR') {
+                                friendlyMessage = 'Some fields could not be parsed automatically.';
+                              }
+                            }
+                            
+                            return (
+                              <div
+                                key={idx}
+                                className={`p-3 border rounded-xl text-2xs space-y-1.5 leading-normal ${
+                                  isBlocking
+                                    ? 'bg-rose-50/50 border-rose-200 text-rose-805 dark:bg-rose-955/20 dark:border-rose-900/50 dark:text-rose-400'
+                                    : isReview
+                                    ? 'bg-amber-50/50 border-amber-200 text-amber-805 dark:bg-amber-955/20 dark:border-amber-900/50 dark:text-amber-400'
+                                    : 'bg-slate-50/50 border-slate-200 text-slate-700 dark:bg-slate-850/50 dark:border-slate-800 dark:text-slate-400'
+                                }`}
+                              >
+                                <div className="flex justify-between items-center">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className={`font-black uppercase text-[8px] px-1.5 py-0.5 rounded tracking-wider ${
+                                      isBlocking
+                                        ? 'bg-rose-200 text-rose-800 dark:bg-rose-950/40 dark:text-rose-405'
+                                        : isReview
+                                        ? 'bg-amber-205 text-amber-800 dark:bg-amber-950/40 dark:text-amber-405'
+                                        : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-350'
+                                    }`}>
+                                      {g.level === 'blocking' ? 'Blocks Approval' : g.level === 'review' ? 'Needs Review' : 'Info'}
+                                    </span>
+                                    {advancedMode && (
+                                      <span className="font-bold font-mono text-[9px] text-slate-450">
+                                        {g.code}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <span className="font-mono text-[10px] font-bold text-slate-500">
+                                    {g.count} row{g.count === 1 ? '' : 's'}
+                                  </span>
+                                </div>
+                                
+                                <p className="text-2xs font-semibold">{friendlyMessage}</p>
+                                
+                                <div className="text-[9px] opacity-80 mt-1">
+                                  {isBlocking
+                                    ? '⚠️ Resolve or override with manual notes before batch approval.'
+                                    : isReview
+                                    ? '🔍 Suggested manual check of transaction crop.'
+                                    : 'ℹ️ Tolerated parser anomaly. Review is optional.'}
+                                </div>
+                                
+                                <details className="text-[9px] mt-1 text-indigo-500 hover:text-indigo-600 dark:text-indigo-400 cursor-pointer">
+                                  <summary className="font-semibold select-none hover:underline">
+                                    {advancedMode ? 'Show technical details' : 'View affected rows'}
+                                  </summary>
+                                  <div className="mt-1.5 p-2 bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded font-mono text-[9px] max-h-24 overflow-y-auto space-y-1">
+                                    {g.examples.map((ex, i) => (
+                                      <div key={i} className="border-b last:border-b-0 py-0.5 select-all border-slate-100 dark:border-slate-800 text-slate-605 dark:text-slate-350">
+                                        {ex}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </details>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   <div className="grid grid-cols-2 gap-3 text-xs">
                     <div className="p-3 bg-slate-50/50 dark:bg-slate-850/50 border border-slate-150 dark:border-slate-800 rounded-xl space-y-1">
@@ -1144,7 +1339,8 @@ function BatchesPageContent() {
                       <p className="text-xs font-semibold">Extracting telemetry logs...</p>
                     </div>
                   ) : selectedTxEvidence ? (
-                    <div className="space-y-4 text-xs">
+                    advancedMode ? (
+                      <div className="space-y-4 text-xs">
                       
                       {/* Nearest Point Card */}
                       <div className="bg-slate-50 dark:bg-slate-850 border border-slate-150 dark:border-slate-800 rounded-xl p-3.5 space-y-2">
@@ -1347,7 +1543,247 @@ function BatchesPageContent() {
                       </div>
 
                     </div>
-                  ) : null}
+                  ) : (
+                    // ─── SIMPLE MODE SELECTED TRANSACTION PANEL ───
+                    <div className="space-y-4 text-xs animate-fade-in">
+                      
+                      {/* If no GPS log files cover this vehicle/date, render a clean empty state card */}
+                      {!selectedTxEvidence.beforePoint && !selectedTxEvidence.afterPoint && (!selectedTxEvidence.pointsInWindow || selectedTxEvidence.pointsInWindow.length === 0) ? (
+                        <div className="bg-slate-50 dark:bg-slate-850 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 text-center space-y-4">
+                          <div className="w-10 h-10 bg-rose-50 dark:bg-rose-955/20 rounded-full flex items-center justify-center mx-auto">
+                            <Satellite className="w-5 h-5 text-rose-500" />
+                          </div>
+                          <div className="space-y-1">
+                            <span className="font-extrabold text-xs text-slate-850 dark:text-white block">No GPS evidence found for this transaction</span>
+                            <p className="text-[11px] text-slate-500 leading-normal max-w-sm mx-auto">
+                              No telemetry coordinates were found near the transaction timestamp.
+                            </p>
+                          </div>
+                          
+                          <div className="bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 rounded-xl p-3 text-left space-y-1.5 text-[10px] text-slate-600 dark:text-slate-400">
+                            <span className="font-bold block text-slate-700 dark:text-slate-350">Possible reasons:</span>
+                            <ul className="list-disc pl-4 space-y-1">
+                              <li>No GPS telematics file uploaded for registration <strong className="font-mono text-slate-900 dark:text-white">{selectedTransaction.registration || selectedTransaction.vehicleRegistration}</strong></li>
+                              <li>The linked GPS files do not cover this date/time range</li>
+                              <li>Vehicle registration mismatch between invoice and GPS log name</li>
+                              <li>Timezone offsets or timestamp formats differ between provider and telemetry</li>
+                            </ul>
+                          </div>
+                          
+                          <div className="flex gap-2 justify-center pt-2">
+                            <button
+                              onClick={() => setActiveStep(3)}
+                              className="px-3 py-1.5 bg-indigo-650 hover:bg-indigo-500 text-white rounded-lg text-2xs font-semibold shadow-sm transition"
+                            >
+                              Upload GPS
+                            </button>
+                            <button
+                              onClick={() => setActiveStep(2)}
+                              className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-800 dark:hover:bg-slate-750 dark:text-slate-350 rounded-lg text-2xs font-semibold transition"
+                            >
+                              Check mapping
+                            </button>
+                            <button
+                              onClick={() => handleRowOverride(selectedTransaction.id, 'Needs Follow Up', 'No GPS telemetry found')}
+                              className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-white rounded-lg text-2xs font-semibold transition"
+                            >
+                              Mark for review
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        // Summary Card
+                        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 space-y-3.5 shadow-sm">
+                          <div className="flex justify-between items-center border-b border-slate-100 dark:border-slate-800 pb-2">
+                            <span className="font-bold text-slate-850 dark:text-white text-sm">Selected transaction</span>
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold ${
+                              selectedTransaction.telematicsAssessment?.classification === 'VERIFIED'
+                                ? 'bg-green-100 text-green-800 dark:bg-green-950/30 dark:text-green-400'
+                                : 'bg-amber-100 text-amber-800 dark:bg-amber-955/30 dark:text-amber-400'
+                            }`}>
+                              {selectedTransaction.telematicsAssessment?.classification === 'VERIFIED' ? 'Verified' : 'Needs review'}
+                            </span>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-y-2 gap-x-4 text-xs font-sans">
+                            <div>
+                              <span className="text-slate-400 block text-[9px] font-semibold uppercase tracking-wider font-sans">Vehicle</span>
+                              <span className="font-mono font-bold text-slate-800 dark:text-slate-200">{selectedTransaction.registration || selectedTransaction.vehicleRegistration || '—'}</span>
+                            </div>
+                            <div>
+                              <span className="text-slate-400 block text-[9px] font-semibold uppercase tracking-wider font-sans">Time</span>
+                              <span className="font-mono text-slate-800 dark:text-slate-200">
+                                {selectedTransaction.transactionTimestamp
+                                  ? new Date(selectedTransaction.transactionTimestamp).toISOString().replace('T', ' ').slice(0, 16)
+                                  : selectedTransaction.transactionDateTime || '—'}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-slate-400 block text-[9px] font-semibold uppercase tracking-wider font-sans">Product</span>
+                              <span className="text-slate-800 dark:text-slate-200">{selectedTransaction.productName || selectedTransaction.productType || '—'}</span>
+                            </div>
+                            <div>
+                              <span className="text-slate-400 block text-[9px] font-semibold uppercase tracking-wider font-sans">Qty</span>
+                              <span className="font-mono font-semibold text-slate-800 dark:text-slate-205">
+                                {parseFloat(selectedTransaction.quantity || selectedTransaction.volume || '0').toFixed(2)} L
+                              </span>
+                            </div>
+                            <div className="col-span-2">
+                              <span className="text-slate-400 block text-[9px] font-semibold uppercase tracking-wider font-sans">Net Amount</span>
+                              <span className="font-mono font-bold text-slate-800 dark:text-slate-205">
+                                €{parseFloat(selectedTransaction.paymentAmountExVat || selectedTransaction.baseValueNet || selectedTransaction.valueOfPurchaseNet || '0').toFixed(2)}
+                              </span>
+                            </div>
+                            <div className="col-span-2 border-t border-slate-100 dark:border-slate-800 pt-2">
+                              <span className="text-slate-400 block text-[9px] font-semibold uppercase tracking-wider font-sans">GPS Result</span>
+                              <span className="font-semibold text-slate-805 dark:text-slate-200 leading-normal block">
+                                {selectedTransaction.telematicsAssessment?.classification === 'VERIFIED'
+                                  ? 'GPS supports this transaction. Vehicle was near the forecourt.'
+                                  : 'No GPS evidence found near invoice time.'}
+                              </span>
+                            </div>
+                            <div className="col-span-2">
+                              <span className="text-slate-400 block text-[9px] font-semibold uppercase tracking-wider font-sans">Recommended Action</span>
+                              <span className="text-indigo-600 dark:text-indigo-400 font-bold block">
+                                {selectedTransaction.telematicsAssessment?.classification === 'VERIFIED'
+                                  ? 'Verify details and approve'
+                                  : 'Upload GPS file or review manually'}
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Action buttons */}
+                          <div className="flex flex-col gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
+                            <button
+                              onClick={() => setSelectedTxForMatch(selectedTransaction)}
+                              className="w-full py-2 px-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-semibold flex items-center justify-center gap-1.5 shadow-sm text-xs transition"
+                            >
+                              <GitCompare className="w-4 h-4" /> Compare invoice vs GPS
+                            </button>
+                            <div className="flex gap-2">
+                              {selectedTransaction.sourceEvidence && (
+                                  <button
+                                    onClick={() => setSelectedTxForSource(selectedTransaction)}
+                                    className="flex-1 py-1.5 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-800 dark:hover:bg-slate-750 dark:text-slate-350 rounded-xl font-semibold flex items-center justify-center gap-1 text-2xs transition"
+                                  >
+                                    <Eye className="w-3.5 h-3.5" /> Open source
+                                  </button>
+                                )}
+                              <button
+                                onClick={() => setShowFullGpsSource(!showFullGpsSource)}
+                                className="flex-1 py-1.5 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-800 dark:hover:bg-slate-750 dark:text-slate-350 rounded-xl font-semibold flex items-center justify-center gap-1 text-2xs transition"
+                              >
+                                <Satellite className="w-3.5 h-3.5" /> {showFullGpsSource ? 'Hide GPS window' : 'Open GPS window'}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* No GPS match details shown inline if no match exists but coordinates DO exist in files */}
+                      {selectedTransaction.telematicsAssessment?.classification !== 'VERIFIED' && (selectedTxEvidence.beforePoint || selectedTxEvidence.afterPoint || selectedTxEvidence.pointsInWindow?.length > 0) && (
+                        <div className="bg-slate-50 dark:bg-slate-850 border border-slate-150 dark:border-slate-800 rounded-2xl p-3.5 space-y-2">
+                          <span className="font-extrabold text-[10px] text-slate-450 uppercase tracking-wider block flex items-center gap-1.5">
+                            <MapPin className="w-3.5 h-3.5 text-indigo-505" />
+                            Where was this vehicle at invoice time?
+                          </span>
+                          <div className="text-2xs leading-normal text-slate-650 dark:text-slate-400 space-y-1.5">
+                            <p className="font-semibold text-rose-600 dark:text-rose-400">No GPS point found within ±30 minutes.</p>
+                            {(() => {
+                              const pts = selectedTxEvidence.pointsInWindow || [];
+                              if (pts.length > 0) {
+                                return <p>Nearest available GPS point: {new Date(pts[0].timestamp).toLocaleString()}</p>;
+                              }
+                              if (selectedTxEvidence.beforePoint) {
+                                return <p>Nearest available GPS point: {new Date(selectedTxEvidence.beforePoint.timestamp).toLocaleString()} (Before window)</p>;
+                              }
+                              if (selectedTxEvidence.afterPoint) {
+                                return <p>Nearest available GPS point: {new Date(selectedTxEvidence.afterPoint.timestamp).toLocaleString()} (After window)</p>;
+                              }
+                              return null;
+                            })()}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* GPS window timeline table shown under "Open GPS window" */}
+                      {showFullGpsSource && (
+                        <div className="space-y-1.5 animate-fade-in">
+                          <span className="font-bold text-[10px] text-slate-455 uppercase tracking-wider block">GPS log timeline</span>
+                          <div className="border border-slate-150 dark:border-slate-800 rounded-xl overflow-hidden max-h-40 overflow-y-auto">
+                            <table className="w-full text-left border-collapse text-3xs">
+                              <thead>
+                                <tr className="bg-slate-50 dark:bg-slate-850 text-slate-550 font-semibold border-b border-slate-150">
+                                  <th className="p-1.5">Time</th>
+                                  <th className="p-1.5">Address</th>
+                                  <th className="p-1.5 text-right">Fuel</th>
+                                  <th className="p-1.5 text-right">KM</th>
+                                  <th className="p-1.5 text-right">Speed</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-slate-100 dark:divide-slate-850 font-mono">
+                                {selectedTxEvidence.pointsInWindow?.length === 0 ? (
+                                  <tr>
+                                    <td colSpan={5} className="p-3 text-center text-slate-450">No logs in window.</td>
+                                  </tr>
+                                ) : (
+                                  selectedTxEvidence.pointsInWindow.map((pt: any, i: number) => (
+                                    <tr key={i} className="hover:bg-slate-50/50">
+                                      <td className="p-1.5 whitespace-nowrap">{new Date(pt.timestamp).toLocaleTimeString()}</td>
+                                      <td className="p-1.5 truncate max-w-[120px]" title={pt.locationAddress}>{pt.locationAddress || `${pt.latitude}, ${pt.longitude}`}</td>
+                                      <td className="p-1.5 text-right">{pt.fuelLevelPercent !== null ? `${Math.round(pt.fuelLevelPercent)}%` : '—'}</td>
+                                      <td className="p-1.5 text-right">{pt.odometerKm ?? '—'}</td>
+                                      <td className="p-1.5 text-right">{pt.speedKmh ?? '—'}</td>
+                                    </tr>
+                                  ))
+                                )}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Auditor overrides notes & actions */}
+                      <div className="space-y-2 border-t border-slate-155 dark:border-slate-800 pt-3">
+                        <span className="font-bold text-[10px] text-slate-505 uppercase tracking-wider block">Auditor Override Decisions</span>
+                        <textarea
+                          value={selectedTransaction.reviewerNote || ''}
+                          placeholder="Provide audit override reason or mapping notes..."
+                          onChange={(e) => {
+                            const note = e.target.value;
+                            setSelectedTransaction({ ...selectedTransaction, reviewerNote: note });
+                          }}
+                          onBlur={(e) => {
+                            handleRowOverride(selectedTransaction.id, selectedTransaction.telematicsOverrideStatus || 'Review', e.target.value);
+                          }}
+                          className="w-full text-2xs p-2 bg-slate-50 dark:bg-slate-855 border border-slate-200 dark:border-slate-700 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 font-sans"
+                          rows={2}
+                        />
+                        <div className="flex gap-1.5 flex-wrap">
+                          <button
+                            onClick={() => handleRowOverride(selectedTransaction.id, 'Marked Supported', selectedTransaction.reviewerNote || 'Verified override')}
+                            className="py-1 px-2.5 bg-green-600 hover:bg-green-500 text-white rounded-lg text-3xs font-semibold"
+                          >
+                            Mark Supported
+                          </button>
+                          <button
+                            onClick={() => handleRowOverride(selectedTransaction.id, 'Flagged Mismatch', selectedTransaction.reviewerNote || 'Flagged issue')}
+                            className="py-1 px-2.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-3xs font-semibold"
+                          >
+                            Flag Issue
+                          </button>
+                          <button
+                            onClick={() => handleRowOverride(selectedTransaction.id, 'Needs Follow Up', selectedTransaction.reviewerNote || '')}
+                            className="py-1 px-2.5 bg-amber-500 hover:bg-amber-400 text-white rounded-lg text-3xs font-semibold"
+                          >
+                            Follow Up
+                          </button>
+                        </div>
+                      </div>
+
+                    </div>
+                  )
+                ) : null}
 
                   {/* Advanced settings preview inside Step 4 */}
                   {advancedMode && (
@@ -1741,6 +2177,7 @@ function BatchesPageContent() {
           isOpen={true}
           onClose={() => setSelectedTxForMatch(null)}
           transactionId={selectedTxForMatch.id}
+          advancedMode={advancedMode}
         />
       )}
 

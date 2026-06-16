@@ -12,6 +12,8 @@ import {
   GitCompare,
   ChevronDown,
   ChevronUp,
+  Edit,
+  Undo,
 } from 'lucide-react';
 import { type CanonicalInvoiceRow } from '@/domain/types';
 
@@ -20,6 +22,10 @@ interface CompactTransactionTableProps {
   onOpenSourceViewer: (tx: any) => void;
   onOpenEvidenceMatchView: (tx: any) => void;
   selectedVehicle?: string | null;
+  advancedMode?: boolean;
+  onSelectTransaction?: (tx: any) => void;
+  onOpenEdit?: (tx: any) => void;
+  onRevertEdit?: (txId: string) => void;
 }
 
 export default function CompactTransactionTable({
@@ -27,6 +33,10 @@ export default function CompactTransactionTable({
   onOpenSourceViewer,
   onOpenEvidenceMatchView,
   selectedVehicle,
+  advancedMode = false,
+  onSelectTransaction,
+  onOpenEdit,
+  onRevertEdit,
 }: CompactTransactionTableProps) {
   const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -189,17 +199,17 @@ export default function CompactTransactionTable({
                 <th className="px-3 py-2 w-12 text-center">Status</th>
                 <th className="px-3 py-2 min-w-[90px]">Date/Time</th>
                 <th className="px-3 py-2 w-20">Vehicle</th>
-                <th className="px-3 py-2 w-20">Source</th>
+                {advancedMode && <th className="px-3 py-2 w-20">Source</th>}
                 <th className="px-3 py-2">Product</th>
                 <th className="px-3 py-2 min-w-[120px]">Location</th>
                 <th className="px-3 py-2 text-right w-16">Qty</th>
                 <th className="px-3 py-2 text-right w-20">Net</th>
-                <th className="px-3 py-2 text-right min-w-[90px]">VAT/Gross</th>
-                <th className="px-3 py-2 text-right w-16">Discount</th>
+                {advancedMode && <th className="px-3 py-2 text-right min-w-[90px]">VAT/Gross</th>}
+                {advancedMode && <th className="px-3 py-2 text-right w-16">Discount</th>}
                 <th className="px-3 py-2 text-center w-24">GPS Match</th>
-                <th className="px-3 py-2 text-right w-12">Conf</th>
-                <th className="px-3 py-2 min-w-[140px] max-w-[200px] truncate">Reason</th>
-                <th className="px-3 py-2 text-center w-14">Doc</th>
+                {advancedMode && <th className="px-3 py-2 text-right w-12">Conf</th>}
+                {advancedMode && <th className="px-3 py-2 min-w-[140px] max-w-[200px] truncate">Reason</th>}
+                <th className="px-3 py-2 text-center w-24 sticky right-0 bg-gray-50 dark:bg-gray-850 border-l border-gray-205 dark:border-gray-800 z-30 shadow-[-4px_0_4px_-4px_rgba(0,0,0,0.1)]">Action</th>
               </tr>
             </thead>
             <tbody>
@@ -211,14 +221,27 @@ export default function CompactTransactionTable({
                 const timezoneText = tx.sourceEvidence?.boundingBox ? 'UTC (STANDSTILL ALIGNED)' : 'UTC';
                 const hasGps = tx.sourceEvidence?.sourceType !== 'GPS_XLS';
 
+                const getGpsStatusText = (classification: string) => {
+                  if (advancedMode) return classification || 'NO GPS';
+                  const cl = String(classification || '').toUpperCase();
+                  if (cl === 'VERIFIED') return 'Verified';
+                  if (cl === 'LIKELY') return 'Likely';
+                  if (cl === 'REVIEW' || cl === 'INSUFFICIENT_EVIDENCE') return 'Needs review';
+                  if (cl === 'UNLIKELY') return 'Unlikely';
+                  return 'No GPS';
+                };
+
                 return (
                   <React.Fragment key={tx.id}>
                     {/* Compact row */}
                     <tr
-                      onClick={() => toggleRow(tx.id)}
+                      onClick={() => {
+                        toggleRow(tx.id);
+                        onSelectTransaction?.(tx);
+                      }}
                       className={`cursor-pointer border-b border-gray-150 dark:border-gray-850 hover:bg-gray-50/50 dark:hover:bg-gray-800/30 transition-colors density-row ${
                         isExpanded ? 'bg-indigo-50/25 dark:bg-indigo-950/10' : ''
-                      }`}
+                      } ${tx.isManuallyEdited ? 'border-l-2 border-l-amber-500 bg-amber-50/5 dark:bg-amber-950/5' : ''}`}
                     >
                       <td className="px-2 py-2 text-center">
                         {isExpanded ? (
@@ -238,13 +261,22 @@ export default function CompactTransactionTable({
                           : tx.transactionDateTime || '—'}
                       </td>
                       <td className="px-3 py-2 font-mono font-bold text-gray-800 dark:text-gray-200">
-                        {tx.registration || tx.vehicleRegistration || '—'}
+                        <div className="flex items-center gap-1.5">
+                          <span>{tx.registration || tx.vehicleRegistration || '—'}</span>
+                          {tx.isManuallyEdited && (
+                            <span className="px-1 py-0.2 rounded text-[8px] bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-400 font-sans" title="Manually edited">
+                              Edited
+                            </span>
+                          )}
+                        </div>
                       </td>
-                      <td className="px-3 py-2">
-                        <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 dark:bg-gray-800 text-slate-600 dark:text-gray-400">
-                          {tx.provider || (tx.sourceEvidence?.sourceType === 'GPS_XLS' ? 'GPS' : '—')}
-                        </span>
-                      </td>
+                      {advancedMode && (
+                        <td className="px-3 py-2">
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 dark:bg-gray-800 text-slate-600 dark:text-gray-400">
+                            {tx.provider || (tx.sourceEvidence?.sourceType === 'GPS_XLS' ? 'GPS' : '—')}
+                          </span>
+                        </td>
+                      )}
                       <td className="px-3 py-2 truncate max-w-[120px]" title={tx.productName}>
                         {tx.productName || tx.productType || '—'}
                       </td>
@@ -260,16 +292,20 @@ export default function CompactTransactionTable({
                       <td className="px-3 py-2 text-right font-mono text-gray-800 dark:text-gray-200">
                         €{parseFloat(tx.paymentAmountExVat || tx.baseValueNet || tx.valueOfPurchaseNet || '0').toFixed(2)}
                       </td>
-                      <td className="px-3 py-2 text-right font-mono text-gray-500">
-                        €{parseFloat(tx.paymentAmountInclVat || tx.valueInPayCurrency || '0').toFixed(2)}
-                      </td>
-                      <td className="px-3 py-2 text-right font-mono text-emerald-600 dark:text-emerald-400">
-                        {parseFloat(tx.discountNet || tx.rebate || '0') !== 0 ? (
-                          <>€{Math.abs(parseFloat(tx.discountNet || tx.rebate || '0')).toFixed(2)}</>
-                        ) : (
-                          '—'
-                        )}
-                      </td>
+                      {advancedMode && (
+                        <td className="px-3 py-2 text-right font-mono text-gray-500">
+                          €{parseFloat(tx.paymentAmountInclVat || tx.valueInPayCurrency || '0').toFixed(2)}
+                        </td>
+                      )}
+                      {advancedMode && (
+                        <td className="px-3 py-2 text-right font-mono text-emerald-600 dark:text-emerald-400">
+                          {parseFloat(tx.discountNet || tx.rebate || '0') !== 0 ? (
+                            <>€{Math.abs(parseFloat(tx.discountNet || tx.rebate || '0')).toFixed(2)}</>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+                      )}
                       <td className="px-3 py-2 text-center">
                         {hasGps && tx.status !== 'PARSER_MAPPING_ERROR' ? (
                           <div className="flex flex-col gap-0.5 items-center">
@@ -279,7 +315,7 @@ export default function CompactTransactionTable({
                                 getGpsStatusBadge(tx.telematicsAssessment?.classification || 'INSUFFICIENT_EVIDENCE')
                               }`}
                             >
-                              {tx.telematicsAssessment?.classification || 'NO GPS'}
+                              {getGpsStatusText(tx.telematicsAssessment?.classification || 'INSUFFICIENT_EVIDENCE')}
                             </span>
                             <span
                               onClick={(e) => { e.stopPropagation(); onOpenEvidenceMatchView(tx); }}
@@ -292,29 +328,33 @@ export default function CompactTransactionTable({
                           <span className="text-gray-400 text-[10px]">--</span>
                         )}
                       </td>
-                      <td className="px-3 py-2 text-right font-medium">
-                        {tx.extractionConfidence ? (
-                          <span className={tx.extractionConfidence >= 90 ? 'text-green-600' : 'text-amber-500'}>
-                            {tx.extractionConfidence}%
-                          </span>
-                        ) : (
-                          '—'
-                        )}
-                      </td>
-                      <td className="px-3 py-2 truncate max-w-[200px]" title={tx.warnings?.join('; ') || tx.status}>
-                        {hasGps && tx.telematicsAssessment ? (
-                          <span className="text-[10px] text-gray-700 dark:text-gray-300 font-mono block truncate">
-                            GPS: nearest {Math.abs(Math.round((new Date(tx.telematicsAssessment.assessedAt).getTime() - new Date(tx.transactionTimestamp).getTime()) / 600000)) || 2} min before · {tx.stationCity || 'VEURNE'} · fuel {tx.telematicsAssessment.factors?.find((f: any) => f.dimension === 'FUEL_LEVEL_MOVEMENT')?.normalisedValue || '+36%'}
-                          </span>
-                        ) : (
-                          <span className="text-gray-500 truncate block">
-                            {tx.warnings?.[0] || (tx.status === 'OK' ? 'Valid and parsed' : tx.status)}
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-3 py-2 text-center" onClick={(e) => e.stopPropagation()}>
-                        {tx.sourceEvidence ? (
-                          <div className="flex items-center gap-1.5 justify-center">
+                      {advancedMode && (
+                        <td className="px-3 py-2 text-right font-medium">
+                          {tx.extractionConfidence ? (
+                            <span className={tx.extractionConfidence >= 90 ? 'text-green-600' : 'text-amber-500'}>
+                              {tx.extractionConfidence}%
+                            </span>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+                      )}
+                      {advancedMode && (
+                        <td className="px-3 py-2 truncate max-w-[200px]" title={tx.warnings?.join('; ') || tx.status}>
+                          {hasGps && tx.telematicsAssessment ? (
+                            <span className="text-[10px] text-gray-700 dark:text-gray-300 font-mono block truncate">
+                              GPS: nearest {Math.abs(Math.round((new Date(tx.telematicsAssessment.assessedAt).getTime() - new Date(tx.transactionTimestamp).getTime()) / 600000)) || 2} min before · {tx.stationCity || 'VEURNE'} · fuel {tx.telematicsAssessment.factors?.find((f: any) => f.dimension === 'FUEL_LEVEL_MOVEMENT')?.normalisedValue || '+36%'}
+                            </span>
+                          ) : (
+                            <span className="text-gray-500 truncate block">
+                              {tx.warnings?.[0] || (tx.status === 'OK' ? 'Valid and parsed' : tx.status)}
+                            </span>
+                          )}
+                        </td>
+                      )}
+                      <td className="px-3 py-2 text-center sticky right-0 bg-white dark:bg-gray-900 border-l border-gray-150 dark:border-gray-850 z-10 shadow-[-4px_0_4px_-4px_rgba(0,0,0,0.1)]" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-center gap-1.5 justify-center">
+                          {tx.sourceEvidence && (
                             <SourcePreviewPopover
                               evidence={tx.sourceEvidence}
                               onOpenSource={() => onOpenSourceViewer(tx)}
@@ -323,24 +363,39 @@ export default function CompactTransactionTable({
                                 <FileText className="w-3.5 h-3.5" />
                               </button>
                             </SourcePreviewPopover>
+                          )}
+                          <button
+                            onClick={() => onOpenEvidenceMatchView(tx)}
+                            className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-emerald-500 hover:text-emerald-600 transition"
+                            title="Compare vs GPS"
+                          >
+                            <GitCompare className="w-3.5 h-3.5" />
+                          </button>
+                          {onOpenEdit && (
                             <button
-                              onClick={() => onOpenEvidenceMatchView(tx)}
-                              className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-emerald-500 hover:text-emerald-600 transition"
-                              title="Compare vs GPS"
+                              onClick={() => onOpenEdit(tx)}
+                              className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-blue-500 hover:text-blue-600 transition"
+                              title="Edit Transaction"
                             >
-                              <GitCompare className="w-3.5 h-3.5" />
+                              <Edit className="w-3.5 h-3.5" />
                             </button>
-                          </div>
-                        ) : (
-                          <span className="text-gray-300">—</span>
-                        )}
+                          )}
+                          {tx.isManuallyEdited && onRevertEdit && (
+                            <button
+                              onClick={() => onRevertEdit(tx.id)}
+                              className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-rose-500 hover:text-rose-600 transition"
+                              title="Revert Manual Edits"
+                            >
+                              <Undo className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
-
                     {/* Inline detail expansion */}
                     {isExpanded && (
                       <tr className="bg-slate-50/40 dark:bg-black/10 border-b border-gray-150 dark:border-gray-800">
-                        <td colSpan={15} className="px-5 py-4">
+                        <td colSpan={advancedMode ? 15 : 10} className="px-5 py-4">
                           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-xs text-gray-600 dark:text-gray-400">
                             
                             {/* Col 1: Warnings & Details */}
@@ -351,7 +406,9 @@ export default function CompactTransactionTable({
                               <div className="p-3 bg-white dark:bg-gray-900 border border-gray-150 dark:border-gray-800 rounded-xl space-y-2">
                                 <div className="flex justify-between items-center text-[11px]">
                                   <span>Verification Outcome:</span>
-                                  <span className="font-semibold text-gray-800 dark:text-white">{tx.status}</span>
+                                  <span className="font-semibold text-gray-800 dark:text-white">
+                                    {!advancedMode && tx.status === 'PARSER_MAPPING_ERROR' ? 'Extraction Warning' : tx.status}
+                                  </span>
                                 </div>
                                 {hasWarnings ? (
                                   <div className="pt-2 border-t border-gray-100 dark:border-gray-800">
@@ -359,7 +416,17 @@ export default function CompactTransactionTable({
                                       <AlertTriangle className="w-3.5 h-3.5" /> Warnings
                                     </span>
                                     <ul className="list-disc pl-4 text-[10px] text-rose-600 dark:text-rose-400 space-y-1">
-                                      {tx.warnings.map((w: string, i: number) => <li key={i}>{w}</li>)}
+                                      {tx.warnings.map((w: string, i: number) => {
+                                        let friendlyW = w;
+                                        if (!advancedMode) {
+                                          if (w.includes('TOLL_NET_NOT_PROVIDED')) {
+                                            friendlyW = 'Toll net value not provided';
+                                          } else if (w.includes('Parser warning')) {
+                                            friendlyW = 'Extraction warning';
+                                          }
+                                        }
+                                        return <li key={i}>{friendlyW}</li>;
+                                      })}
                                     </ul>
                                   </div>
                                 ) : (
@@ -411,7 +478,9 @@ export default function CompactTransactionTable({
                                   <div className="text-[10px] space-y-1">
                                     <div className="flex justify-between">
                                       <span>Classification:</span>
-                                      <span className="font-semibold text-indigo-500">{tx.telematicsAssessment?.classification}</span>
+                                      <span className="font-semibold text-indigo-500">
+                                        {!advancedMode && (tx.telematicsAssessment?.classification === 'INSUFFICIENT_EVIDENCE' || tx.telematicsAssessment?.classification === 'REVIEW') ? 'Needs review' : (tx.telematicsAssessment?.classification || 'Needs review')}
+                                      </span>
                                     </div>
                                     <div className="flex justify-between">
                                       <span>Proximity Score:</span>

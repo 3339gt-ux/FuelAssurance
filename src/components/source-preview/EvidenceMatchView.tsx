@@ -38,6 +38,7 @@ interface EvidenceMatchViewProps {
   transactionId: string;
   onPrev?: () => void;
   onNext?: () => void;
+  advancedMode?: boolean;
 }
 
 export default function EvidenceMatchView({
@@ -46,6 +47,7 @@ export default function EvidenceMatchView({
   transactionId,
   onPrev,
   onNext,
+  advancedMode = false,
 }: EvidenceMatchViewProps) {
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -61,6 +63,7 @@ export default function EvidenceMatchView({
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [reviewerNote, setReviewerNote] = useState('');
   const [manualStatus, setManualStatus] = useState<string | null>(null);
+  const [showTechnicalDetails, setShowTechnicalDetails] = useState(false);
 
   const pdfRendererRef = useRef<any>(null);
 
@@ -220,6 +223,70 @@ export default function EvidenceMatchView({
 
   const nearestInfo = getNearestPoint();
 
+  const getGpsStatusText = (classification: string) => {
+    if (advancedMode) return classification || 'NO GPS';
+    const cl = String(classification || '').toUpperCase();
+    if (cl === 'VERIFIED') return 'Verified';
+    if (cl === 'LIKELY') return 'Likely';
+    if (cl === 'REVIEW' || cl === 'INSUFFICIENT_EVIDENCE') return 'Needs review';
+    if (cl === 'UNLIKELY') return 'Unlikely';
+    return 'No GPS';
+  };
+
+  const getGpsPlainEnglishSummary = () => {
+    if (!nearestInfo?.point) {
+      return {
+        title: "No GPS evidence found for this transaction",
+        desc: `No GPS telemetry logs were found covering this vehicle's registration (${tx?.registration || 'N/A'}) near the transaction timestamp.`,
+        reasons: [
+          "No GPS file uploaded for this vehicle",
+          "GPS file does not cover this date range",
+          "Vehicle registration differs between invoice and GPS",
+          "Timezone/date format may need review"
+        ],
+        actions: ["Upload GPS file", "Check vehicle registration mapping", "Mark for manual review"]
+      };
+    }
+
+    const diffStr = nearestInfo.diffMinutes === 0
+      ? 'at the exact same time'
+      : `${nearestInfo.diffMinutes} minutes ${new Date(nearestInfo.point.timestamp).getTime() < new Date(tx.transactionTimestamp).getTime() ? 'before' : 'after'} invoice time`;
+
+    const loc = nearestInfo.point.locationAddress || `${nearestInfo.point.latitude}, ${nearestInfo.point.longitude}`;
+    const cl = assessment?.classification || 'REVIEW';
+
+    if (cl === 'VERIFIED') {
+      const fuelBefore = beforePoint?.fuelLevelPercent !== undefined ? Math.round(beforePoint.fuelLevelPercent) : null;
+      const fuelAfter = afterPoint?.fuelLevelPercent !== undefined ? Math.round(afterPoint.fuelLevelPercent) : null;
+      const fuelDiff = (fuelBefore !== null && fuelAfter !== null) ? (fuelAfter - fuelBefore) : null;
+
+      return {
+        title: "GPS supports this transaction",
+        desc: `Vehicle was near ${loc} ${diffStr}.` + 
+          (fuelDiff && fuelDiff > 0 ? ` Fuel increased from ${fuelBefore}% to ${fuelAfter}% within the review window.` : '')
+      };
+    }
+
+    if (cl === 'LIKELY') {
+      return {
+        title: "GPS likely supports this transaction",
+        desc: `Vehicle was detected nearby (${loc}) ${diffStr}. Proximity and timestamps align.`
+      };
+    }
+
+    if (cl === 'UNLIKELY') {
+      return {
+        title: "GPS conflicts with this transaction",
+        desc: `Vehicle was located at ${loc} ${diffStr}, which differs from the invoice location.`
+      };
+    }
+
+    return {
+      title: "GPS evidence requires review",
+      desc: `A GPS point was found near the transaction time (${diffStr} at ${loc}), but it could not be fully verified (e.g. speed was too high, or fuel level didn't show a clear change).`
+    };
+  };
+
   const getStatusColor = (classification: string) => {
     switch (classification) {
       case 'VERIFIED': return 'text-green-700 bg-green-500/10 dark:text-green-400 dark:bg-green-950/20 border-green-200 dark:border-green-900/50';
@@ -266,8 +333,8 @@ export default function EvidenceMatchView({
           <div className="flex items-center gap-2">
             <Sparkles className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
             <div>
-              <h3 className="text-sm font-bold text-gray-900 dark:text-white">
-                Evidence Match View
+              <h3 className="text-sm font-black text-gray-900 dark:text-white uppercase tracking-tight">
+                {tx ? `Vehicle ${tx.registration || 'N/A'} · ${tx.productName || tx.productType || 'N/A'} · ${parseFloat(tx.quantity || '0').toFixed(2)} L · ${getGpsStatusText(manualStatus || assessment?.classification || 'INSUFFICIENT_EVIDENCE')}` : 'Evidence Match View'}
               </h3>
               <p className="text-[10px] text-gray-500">
                 Auditor tool: overlap check between Invoice / Spreadsheet evidence and GPS Telematics
@@ -369,12 +436,14 @@ export default function EvidenceMatchView({
                 <div className={`px-2 py-1 rounded border flex items-center gap-1.5 ${getStatusColor(manualStatus || assessment?.classification || 'INSUFFICIENT_EVIDENCE')}`}>
                   {getStatusIcon(manualStatus || assessment?.classification || 'INSUFFICIENT_EVIDENCE')}
                   <span className="font-extrabold uppercase text-[10px] tracking-wider">
-                    {manualStatus || assessment?.classification || 'INSUFFICIENT_EVIDENCE'}
+                    {getGpsStatusText(manualStatus || assessment?.classification || 'INSUFFICIENT_EVIDENCE')}
                   </span>
                 </div>
-                <div className="text-[10px] text-gray-500">
-                  Score: <span className="font-bold font-mono">{assessment?.totalScore || 0}/100</span>
-                </div>
+                {(advancedMode || showTechnicalDetails) && (
+                  <div className="text-[10px] text-gray-500">
+                    Score: <span className="font-bold font-mono">{assessment?.totalScore || 0}/100</span>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -389,8 +458,8 @@ export default function EvidenceMatchView({
                       <FileText className="w-4 h-4" />
                     </div>
                     <div>
-                      <span className="text-xs font-bold text-gray-900 dark:text-white uppercase tracking-wider block">
-                        Invoice / Source Document
+                      <span className="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider block">
+                        INVOICE SAYS
                       </span>
                       <span className="text-[10px] text-gray-400 block truncate max-w-[280px]">
                         File: {tx?.sourceEvidence?.sourceFileName || 'N/A'}
@@ -554,14 +623,14 @@ export default function EvidenceMatchView({
               {/* RIGHT SIDE: GPS / VEHICLE TELEMATICS PANEL */}
               <div className="flex flex-col bg-white dark:bg-gray-900 overflow-y-auto p-5 gap-4">
                 
-                <div className="flex items-center justify-between border-b border-gray-100 dark:border-gray-800 pb-2.5">
+                <div className="flex items-center justify-between border-b border-gray-150 dark:border-gray-800 pb-2.5">
                   <div className="flex items-center gap-2">
                     <div className="p-1.5 bg-emerald-50 dark:bg-emerald-950/20 text-emerald-500 rounded">
                       <Satellite className="w-4 h-4" />
                     </div>
                     <div>
                       <span className="text-xs font-bold text-gray-900 dark:text-white uppercase tracking-wider block">
-                        GPS / Vehicle Telematics
+                        GPS SAYS
                       </span>
                       <span className="text-[10px] text-gray-400 block">
                         Physical location & fuel levels at transaction timestamp
@@ -569,191 +638,170 @@ export default function EvidenceMatchView({
                     </div>
                   </div>
 
-                  <button
-                    onClick={() => setShowFullGpsSource(!showFullGpsSource)}
-                    className="text-[10px] text-indigo-600 dark:text-indigo-400 font-semibold hover:underline bg-indigo-50 dark:bg-indigo-950/30 px-2 py-1 rounded"
-                  >
-                    {showFullGpsSource ? 'Close Source Rows' : 'Open GPS Source Rows'}
-                  </button>
+                  {nearestInfo?.point && (
+                    <button
+                      onClick={() => setShowFullGpsSource(!showFullGpsSource)}
+                      className="text-[10px] text-indigo-600 dark:text-indigo-400 font-semibold hover:underline bg-indigo-50 dark:bg-indigo-950/30 px-2 py-1 rounded"
+                    >
+                      {showFullGpsSource ? 'Close Source Rows' : 'Open GPS Source Rows'}
+                    </button>
+                  )}
                 </div>
 
                 {!showFullGpsSource ? (
                   <div className="space-y-4">
-                    
-                    {/* WHERE WAS THE VEHICLE AT INVOICE TIME */}
-                    <div className="bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-150 dark:border-gray-800 p-4">
-                      <h4 className="text-[10px] uppercase font-extrabold tracking-wider text-slate-500 dark:text-gray-400 mb-2.5 flex items-center gap-1.5">
-                        <MapPin className="w-3.5 h-3.5 text-indigo-500" />
-                        Where was the vehicle at Invoice time?
-                      </h4>
-
-                      {nearestInfo?.point ? (
-                        <div className="space-y-2.5 text-[11px]">
-                          <div className="flex justify-between border-b border-gray-100 dark:border-gray-800 pb-1.5">
-                            <span className="text-gray-500">Nearest GPS point:</span>
-                            <span className="font-mono font-semibold text-gray-800 dark:text-gray-200">
-                              {new Date(nearestInfo.point.timestamp).toLocaleString()}
-                            </span>
-                          </div>
+                    {/* Plain English GPS Answer Card */}
+                    {(() => {
+                      const summary = getGpsPlainEnglishSummary();
+                      const isNoGps = !nearestInfo?.point;
+                      const cl = assessment?.classification || 'REVIEW';
+                      return (
+                        <div className={`p-4 rounded-xl border ${
+                          isNoGps
+                            ? 'bg-rose-50 border-rose-250 text-rose-950 dark:bg-rose-950/20 dark:border-rose-900/50 dark:text-rose-200'
+                            : (cl === 'VERIFIED' || cl === 'LIKELY')
+                            ? 'bg-emerald-50 border-emerald-200 text-emerald-950 dark:bg-emerald-950/20 dark:border-emerald-900/50 dark:text-emerald-200'
+                            : 'bg-amber-50 border-amber-200 text-amber-950 dark:bg-amber-950/20 dark:border-amber-900/50 dark:text-amber-200'
+                        }`}>
+                          <h4 className="font-bold text-xs uppercase tracking-wider mb-1 flex items-center gap-1.5">
+                            {summary.title}
+                          </h4>
+                          <p className="text-[11px] leading-relaxed">{summary.desc}</p>
                           
-                          <div className="flex justify-between border-b border-gray-100 dark:border-gray-800 pb-1.5">
-                            <span className="text-gray-500">Time difference:</span>
-                            <span className="font-semibold text-indigo-600 dark:text-indigo-400">
-                              {nearestInfo.diffMinutes === 0 ? 'Same minute' : `${nearestInfo.diffMinutes} minutes ${new Date(nearestInfo.point.timestamp).getTime() < new Date(tx.transactionTimestamp).getTime() ? 'before' : 'after'} invoice time`}
-                            </span>
-                          </div>
-
-                          <div className="flex justify-between border-b border-gray-100 dark:border-gray-800 pb-1.5">
-                            <span className="text-gray-500">Vehicle location:</span>
-                            <span className="font-bold text-gray-900 dark:text-white max-w-[240px] text-right truncate" title={nearestInfo.point.locationAddress}>
-                              {nearestInfo.point.locationAddress || `${nearestInfo.point.latitude}, ${nearestInfo.point.longitude}`}
-                            </span>
-                          </div>
-
-                          <div className="grid grid-cols-3 gap-2 pt-1 font-mono text-[10px] text-center">
-                            <div className="bg-white dark:bg-gray-900 border rounded p-1.5">
-                              <span className="text-[8px] text-gray-400 block uppercase">Speed</span>
-                              <span className="font-bold">{nearestInfo.point.speedKmh ?? '—'} km/h</span>
+                          {isNoGps && (
+                            <div className="mt-3 text-[10px] space-y-2">
+                              <p className="font-semibold">Possible reasons:</p>
+                              <ul className="list-disc pl-4 space-y-0.5">
+                                {summary.reasons?.map((r, i) => <li key={i}>{r}</li>)}
+                              </ul>
+                              <p className="font-semibold pt-1">Next actions:</p>
+                              <div className="flex gap-2 pt-0.5">
+                                <span className="px-2.5 py-1 bg-white dark:bg-gray-850 rounded border border-gray-200 dark:border-gray-850 font-semibold text-gray-700 dark:text-gray-300">Upload GPS</span>
+                                <span className="px-2.5 py-1 bg-white dark:bg-gray-850 rounded border border-gray-200 dark:border-gray-850 font-semibold text-gray-700 dark:text-gray-300">Check vehicle mapping</span>
+                                <span className="px-2.5 py-1 bg-white dark:bg-gray-850 rounded border border-gray-200 dark:border-gray-850 font-semibold text-gray-700 dark:text-gray-300">Mark for review</span>
+                              </div>
                             </div>
-                            <div className="bg-white dark:bg-gray-900 border rounded p-1.5">
-                              <span className="text-[8px] text-gray-400 block uppercase">Odometer</span>
-                              <span className="font-bold">{nearestInfo.point.odometerKm ?? '—'} km</span>
+                          )}
+                        </div>
+                      );
+                    })()}
+
+                    {/* GPS WINDOW TIMELINE TABLE (Only if GPS point exists) */}
+                    {nearestInfo?.point && (
+                      <div className="space-y-2">
+                        <div className="flex justify-between items-center">
+                          <span className="font-bold text-gray-700 dark:text-gray-300">
+                            GPS window around transaction time
+                          </span>
+                          <div className="relative">
+                            <Search className="w-3 h-3 absolute left-2 top-1/2 -translate-y-1/2 text-gray-450" />
+                            <input
+                              type="text"
+                              placeholder="Filter GPS..."
+                              value={gpsSearch}
+                              onChange={(e) => setGpsSearch(e.target.value)}
+                              className="text-[10px] pl-6 pr-2 py-0.5 border border-gray-200 dark:border-gray-750 bg-gray-50 dark:bg-gray-800 rounded focus:outline-none"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="border border-gray-150 dark:border-gray-800 rounded-xl overflow-hidden max-h-[220px] overflow-y-auto">
+                          <table className="w-full text-left border-collapse text-[10px]">
+                            <thead>
+                              <tr className="bg-gray-100 dark:bg-gray-800/80 border-b border-gray-200 dark:border-gray-750 font-semibold text-gray-500">
+                                <th className="px-2 py-1.5 w-16">Relation</th>
+                                <th className="px-2 py-1.5">GPS Time</th>
+                                <th className="px-2 py-1.5 text-right">Δ min</th>
+                                <th className="px-2 py-1.5">Location</th>
+                                <th className="px-2 py-1.5 text-right">Fuel %</th>
+                                <th className="px-2 py-1.5 text-right">KM</th>
+                                <th className="px-2 py-1.5 text-right">Speed</th>
+                                <th className="px-2 py-1.5">Activity</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {filteredPoints.length === 0 ? (
+                                <tr>
+                                  <td colSpan={8} className="text-center p-4 text-gray-400">No GPS rows found in window.</td>
+                                </tr>
+                              ) : (
+                                filteredPoints.map((pt: any, idx: number) => {
+                                  const ptTime = new Date(pt.timestamp).getTime();
+                                  const txTime = new Date(tx.transactionTimestamp).getTime();
+                                  const diffMin = Math.round((ptTime - txTime) / 60000);
+                                  const isNearest = nearestInfo?.point?.id === pt.id;
+                                  
+                                  let relation = 'Window';
+                                  if (isNearest) relation = 'Nearest';
+                                  else if (diffMin < 0) relation = 'Before';
+                                  else if (diffMin > 0) relation = 'After';
+
+                                  return (
+                                    <tr
+                                      key={pt.id || idx}
+                                      className={`border-b border-gray-100 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-800/40 ${isNearest ? 'bg-indigo-50/50 dark:bg-indigo-950/20 font-semibold' : ''}`}
+                                    >
+                                      <td className="px-2 py-1.5">
+                                        <span className={`px-1 rounded text-[9px] ${isNearest ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-550'}`}>
+                                          {relation}
+                                        </span>
+                                      </td>
+                                      <td className="px-2 py-1.5 font-mono">{new Date(pt.timestamp).toLocaleTimeString()}</td>
+                                      <td className={`px-2 py-1.5 text-right font-mono ${diffMin < 0 ? 'text-blue-500' : diffMin > 0 ? 'text-amber-500' : 'text-green-500 font-bold'}`}>
+                                        {diffMin > 0 ? `+${diffMin}` : diffMin}
+                                      </td>
+                                      <td className="px-2 py-1.5 truncate max-w-[120px]" title={pt.locationAddress}>{pt.locationAddress || 'N/A'}</td>
+                                      <td className="px-2 py-1.5 text-right font-mono font-semibold text-emerald-600">
+                                        {pt.fuelLevelPercent !== null ? `${Math.round(pt.fuelLevelPercent)}%` : '—'}
+                                      </td>
+                                      <td className="px-2 py-1.5 text-right font-mono">{pt.odometerKm ?? '—'}</td>
+                                      <td className="px-2 py-1.5 text-right font-mono">{pt.speedKmh ?? '—'}</td>
+                                      <td className="px-2 py-1.5 truncate max-w-[80px]" title={pt.activity}>{pt.activity || '—'}</td>
+                                    </tr>
+                                  );
+                                })
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* PRODUCT-SPECIFIC ENGINE COMPARISON DETAILS */}
+                    {nearestInfo?.point && isFuelTx && (advancedMode || showTechnicalDetails) && (
+                      <div className="bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-150 dark:border-gray-800 p-4 space-y-2 text-xs">
+                        <span className="font-bold block text-[10px] text-slate-500 uppercase tracking-wider">
+                          Product-Specific Validation Scope
+                        </span>
+                        {!isAdBlue ? (
+                          <div className="grid grid-cols-2 gap-3 pt-1">
+                            <div className="bg-white dark:bg-gray-900 border rounded p-2.5 space-y-1">
+                              <span className="text-[9px] text-gray-400 block font-semibold">Expected fuel movement:</span>
+                              <span className="font-mono text-indigo-600 dark:text-indigo-400 font-semibold block">
+                                +{Math.round((parseFloat(tx.quantity || '0') / 1200) * 100)}%
+                              </span>
+                              <span className="text-[8px] text-gray-400 block font-sans">For {parseFloat(tx.quantity || '0').toFixed(1)}L fill in 1,200L tank</span>
                             </div>
-                            <div className="bg-white dark:bg-gray-900 border rounded p-1.5">
-                              <span className="text-[8px] text-gray-400 block uppercase">Fuel level</span>
-                              <span className="font-bold text-emerald-600 dark:text-emerald-400">
-                                {nearestInfo.point.fuelLevelPercent !== null ? `${Math.round(nearestInfo.point.fuelLevelPercent)}%` : '—'}
+                            <div className="bg-white dark:bg-gray-900 border rounded p-2.5 space-y-1">
+                              <span className="text-[9px] text-gray-400 block font-semibold">Observed fuel movement:</span>
+                              <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400 block">
+                                {fuelDetails?.observedIncreasePercent !== undefined ? `+${Math.round(fuelDetails.observedIncreasePercent)}%` : '—'}
+                              </span>
+                              <span className="text-[8px] text-gray-400 block font-sans">
+                                {fuelDetails ? `Stable reading ${Math.round(fuelDetails.fuelBeforePercent)}% → ${Math.round(fuelDetails.fuelAfterPercent)}%` : 'No sensor level data'}
                               </span>
                             </div>
                           </div>
-                        </div>
-                      ) : (
-                        <div className="p-3 bg-rose-50 dark:bg-rose-950/20 border border-rose-100 dark:border-rose-900 rounded text-[10px] text-rose-700 dark:text-rose-450">
-                          No GPS point found within the configured time window.
-                          Nearest available GPS point was {data.beforePoint || data.afterPoint ? 'outside window' : 'not found in telematics log'}.
-                        </div>
-                      )}
-                    </div>
-
-                    {/* GPS WINDOW TIMELINE TABLE */}
-                    <div className="space-y-2">
-                      <div className="flex justify-between items-center">
-                        <span className="font-bold text-gray-700 dark:text-gray-300">
-                          GPS window around transaction time
-                        </span>
-                        <div className="relative">
-                          <Search className="w-3 h-3 absolute left-2 top-1/2 -translate-y-1/2 text-gray-450" />
-                          <input
-                            type="text"
-                            placeholder="Filter GPS..."
-                            value={gpsSearch}
-                            onChange={(e) => setGpsSearch(e.target.value)}
-                            className="text-[10px] pl-6 pr-2 py-0.5 border border-gray-200 dark:border-gray-750 bg-gray-50 dark:bg-gray-800 rounded focus:outline-none"
-                          />
-                        </div>
-                      </div>
-
-                      <div className="border border-gray-150 dark:border-gray-800 rounded-xl overflow-hidden max-h-[220px] overflow-y-auto">
-                        <table className="w-full text-left border-collapse text-[10px]">
-                          <thead>
-                            <tr className="bg-gray-100 dark:bg-gray-800/80 border-b border-gray-200 dark:border-gray-750 font-semibold text-gray-500">
-                              <th className="px-2 py-1.5 w-16">Relation</th>
-                              <th className="px-2 py-1.5">GPS Time</th>
-                              <th className="px-2 py-1.5 text-right">Δ min</th>
-                              <th className="px-2 py-1.5">Location</th>
-                              <th className="px-2 py-1.5 text-right">Fuel %</th>
-                              <th className="px-2 py-1.5 text-right">KM</th>
-                              <th className="px-2 py-1.5 text-right">Speed</th>
-                              <th className="px-2 py-1.5">Activity</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {filteredPoints.length === 0 ? (
-                              <tr>
-                                <td colSpan={8} className="text-center p-4 text-gray-400">No GPS rows found in window.</td>
-                              </tr>
-                            ) : (
-                              filteredPoints.map((pt: any, idx: number) => {
-                                const ptTime = new Date(pt.timestamp).getTime();
-                                const txTime = new Date(tx.transactionTimestamp).getTime();
-                                const diffMin = Math.round((ptTime - txTime) / 60000);
-                                const isNearest = nearestInfo?.point?.id === pt.id;
-                                
-                                let relation = 'Window';
-                                if (isNearest) relation = 'Nearest';
-                                else if (diffMin < 0) relation = 'Before';
-                                else if (diffMin > 0) relation = relation = 'After';
-
-                                return (
-                                  <tr
-                                    key={pt.id || idx}
-                                    className={`border-b border-gray-100 dark:border-gray-850 hover:bg-gray-50 dark:hover:bg-gray-800/40 ${isNearest ? 'bg-indigo-50/50 dark:bg-indigo-950/20 font-semibold' : ''}`}
-                                  >
-                                    <td className="px-2 py-1.5">
-                                      <span className={`px-1 rounded text-[9px] ${isNearest ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-550'}`}>
-                                        {relation}
-                                      </span>
-                                    </td>
-                                    <td className="px-2 py-1.5 font-mono">{new Date(pt.timestamp).toLocaleTimeString()}</td>
-                                    <td className={`px-2 py-1.5 text-right font-mono ${diffMin < 0 ? 'text-blue-500' : diffMin > 0 ? 'text-amber-500' : 'text-green-500 font-bold'}`}>
-                                      {diffMin > 0 ? `+${diffMin}` : diffMin}
-                                    </td>
-                                    <td className="px-2 py-1.5 truncate max-w-[120px]" title={pt.locationAddress}>{pt.locationAddress || 'N/A'}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono font-semibold text-emerald-600">
-                                      {pt.fuelLevelPercent !== null ? `${Math.round(pt.fuelLevelPercent)}%` : '—'}
-                                    </td>
-                                    <td className="px-2 py-1.5 text-right font-mono">{pt.odometerKm ?? '—'}</td>
-                                    <td className="px-2 py-1.5 text-right font-mono">{pt.speedKmh ?? '—'}</td>
-                                    <td className="px-2 py-1.5 truncate max-w-[80px]" title={pt.activity}>{pt.activity || '—'}</td>
-                                  </tr>
-                                );
-                              })
-                            )}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-
-                    {/* PRODUCT-SPECIFIC ENGINE COMPARISON DETAILS */}
-                    <div className="bg-slate-50 dark:bg-slate-800/50 rounded-xl border border-slate-150 dark:border-gray-800 p-4 space-y-2 text-xs">
-                      <span className="font-bold block text-[10px] text-slate-500 uppercase tracking-wider">
-                        Product-Specific Validation Scope
-                      </span>
-                      {isFuelTx && !isAdBlue ? (
-                        <div className="grid grid-cols-2 gap-3 pt-1">
-                          <div className="bg-white dark:bg-gray-900 border rounded p-2.5 space-y-1">
-                            <span className="text-[9px] text-gray-400 block font-semibold">Expected fuel movement:</span>
-                            <span className="font-mono text-indigo-600 dark:text-indigo-400 font-semibold block">
-                              +{Math.round((parseFloat(tx.quantity || '0') / 1200) * 100)}%
-                            </span>
-                            <span className="text-[8px] text-gray-400 block font-sans">For {parseFloat(tx.quantity || '0').toFixed(1)}L fill in 1,200L tank</span>
-                          </div>
-                          <div className="bg-white dark:bg-gray-900 border rounded p-2.5 space-y-1">
-                            <span className="text-[9px] text-gray-400 block font-semibold">Observed fuel movement:</span>
-                            <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400 block">
-                              {fuelDetails?.observedIncreasePercent !== undefined ? `+${Math.round(fuelDetails.observedIncreasePercent)}%` : '—'}
-                            </span>
-                            <span className="text-[8px] text-gray-400 block font-sans">
-                              {fuelDetails ? `Stable reading ${Math.round(fuelDetails.fuelBeforePercent)}% → ${Math.round(fuelDetails.fuelAfterPercent)}%` : 'No sensor level data'}
+                        ) : (
+                          <div className="p-3 bg-indigo-50/40 dark:bg-indigo-950/20 border border-indigo-100 rounded text-[10px] flex items-start gap-1.5">
+                            <Info className="w-3.5 shrink-0 mt-0.5 text-indigo-500" />
+                            <span>
+                              <strong>AdBlue product matched:</strong> Diesel tank fuel movement level checks are not enforced for AdBlue fills. Validation is based on location proximity and stop timeline event checks.
                             </span>
                           </div>
-                        </div>
-                      ) : isAdBlue ? (
-                        <div className="p-3 bg-indigo-50/40 dark:bg-indigo-950/20 border border-indigo-100 rounded text-[10px] flex items-start gap-1.5">
-                          <Info className="w-3.5 shrink-0 mt-0.5 text-indigo-500" />
-                          <span>
-                            <strong>AdBlue product matched:</strong> Diesel tank fuel movement level checks are not enforced for AdBlue fills. Validation is based on location proximity and stop timeline event checks.
-                          </span>
-                        </div>
-                      ) : (
-                        <div className="p-3 bg-indigo-50/40 dark:bg-indigo-950/20 border border-indigo-100 rounded text-[10px] flex items-start gap-1.5">
-                          <Info className="w-3.5 shrink-0 mt-0.5 text-indigo-500" />
-                          <span>
-                            <strong>Non-fuel transaction ({tx?.productType}):</strong> Parking/toll/service fee. Fuel movement verification skipped. Matching relies entirely on location coordinates and route schedule logs.
-                          </span>
-                        </div>
-                      )}
-                    </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 ) : (
                   // FULL GPS SOURCE VIEWER TAB OVERLAY
@@ -765,7 +813,7 @@ export default function EvidenceMatchView({
                       </span>
                     </div>
 
-                    <div className="flex-1 overflow-auto border border-gray-200 dark:border-gray-800 rounded-xl bg-gray-50 dark:bg-gray-950/40">
+                    <div className="flex-1 overflow-auto border border-gray-200 dark:border-gray-800 rounded-xl bg-gray-55 dark:bg-gray-950/40">
                       <table className="w-full text-left border-collapse text-[10px] table-fixed">
                         <thead className="sticky top-0 z-20 bg-gray-100 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-750">
                           <tr className="text-gray-600 font-semibold">
@@ -801,56 +849,122 @@ export default function EvidenceMatchView({
                     </div>
                   </div>
                 )}
-              </div>
-            </div>
-
-            {/* 3. Bottom Audit Decisions & Notes Explanation Bar */}
-            <div className="bg-white dark:bg-gray-900 border-t border-gray-150 dark:border-gray-800 p-4 flex flex-col md:flex-row gap-4 items-center justify-between shadow-inner">
-              <div className="flex-1 text-xs text-gray-650 dark:text-gray-400 space-y-1 max-w-[500px]">
-                <span className="font-extrabold uppercase text-[10px] text-slate-400 block tracking-wider">
-                  Reconciliation explanation
-                </span>
-                <p className="leading-relaxed text-[11px]">
-                  {manualStatus
-                    ? `Manual Overruled decision status active: ${manualStatus.toUpperCase()}.`
-                    : assessment?.factors?.find((f: any) => f.dimension === 'FUEL_LEVEL_MOVEMENT')?.explanation ||
-                      'Time and location proximity checked. Review nearest telematics timestamps below.'}
-                </p>
-              </div>
-
-              {/* Status Update / Action panel */}
-              <div className="flex flex-col sm:flex-row items-center gap-3 w-full md:w-auto">
-                <div className="flex-1 sm:w-64">
-                  <input
-                    type="text"
-                    placeholder="Enter manual auditor note..."
-                    value={reviewerNote}
-                    onChange={(e) => setReviewerNote(e.target.value)}
-                    className="w-full text-xs px-3 py-1.5 bg-gray-55 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-505"
-                  />
+                  {/* 3. Bottom Audit Decisions & Notes Explanation Bar */}
+            <div className="bg-white dark:bg-gray-900 border-t border-gray-150 dark:border-gray-800 p-4 space-y-4 shadow-inner">
+              <div className="flex flex-col md:flex-row gap-4 items-center justify-between">
+                <div className="flex-1 text-xs text-gray-650 dark:text-gray-400 space-y-1">
+                  <span className="font-extrabold uppercase text-[10px] text-indigo-650 dark:text-indigo-400 block tracking-wider">
+                    DECISION: {getGpsStatusText(manualStatus || assessment?.classification || 'INSUFFICIENT_EVIDENCE')}
+                  </span>
+                  <p className="leading-relaxed text-[11px] font-medium text-gray-800 dark:text-gray-200">
+                    {manualStatus
+                      ? `Manual Overruled decision status active: ${manualStatus.toUpperCase()}.`
+                      : assessment?.factors?.find((f: any) => f.dimension === 'FUEL_LEVEL_MOVEMENT')?.explanation ||
+                        'Location proximity verified near transaction time.'}
+                  </p>
                 </div>
 
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => handleUpdateStatus('Validated')}
-                    className="px-3 py-1.5 bg-green-600 hover:bg-green-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1 shadow-sm transition-colors"
-                  >
-                    <Check className="w-3.5 h-3.5" /> Mark Supported
-                  </button>
-                  <button
-                    onClick={() => handleUpdateStatus('Needs field review')}
-                    className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1 shadow-sm transition-colors"
-                  >
-                    <Flag className="w-3.5 h-3.5" /> Flag Issue
-                  </button>
-                  <button
-                    onClick={() => handleUpdateStatus('overridden')}
-                    className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1 shadow-sm transition-colors"
-                  >
-                    <PenTool className="w-3.5 h-3.5" /> Override with reason
-                  </button>
+                {/* Status Update / Action panel */}
+                <div className="flex flex-col sm:flex-row items-center gap-3 w-full md:w-auto">
+                  <div className="flex-1 sm:w-64">
+                    <input
+                      type="text"
+                      placeholder="Enter manual auditor note..."
+                      value={reviewerNote}
+                      onChange={(e) => setReviewerNote(e.target.value)}
+                      className="w-full text-xs px-3 py-1.5 bg-gray-50 dark:bg-gray-850 border border-gray-200 dark:border-gray-800 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    />
+                  </div>
+
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => handleUpdateStatus('Validated')}
+                      className="px-3 py-1.5 bg-green-600 hover:bg-green-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1 shadow-sm transition-colors"
+                    >
+                      <Check className="w-3.5 h-3.5" /> Mark Supported
+                    </button>
+                    <button
+                      onClick={() => handleUpdateStatus('Needs field review')}
+                      className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1 shadow-sm transition-colors"
+                    >
+                      <Flag className="w-3.5 h-3.5" /> Flag Issue
+                    </button>
+                    <button
+                      onClick={() => handleUpdateStatus('overridden')}
+                      className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1 shadow-sm transition-colors"
+                    >
+                      <PenTool className="w-3.5 h-3.5" /> Override with reason
+                    </button>
+                  </div>
                 </div>
               </div>
+
+              {/* Show Technical details toggle */}
+              <div className="pt-2 border-t border-gray-100 dark:border-gray-800 flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <button
+                    onClick={() => setShowTechnicalDetails(!showTechnicalDetails)}
+                    className="text-[10px] text-indigo-500 hover:text-indigo-600 dark:text-indigo-400 hover:underline font-bold flex items-center gap-1"
+                  >
+                    <span>{showTechnicalDetails ? 'Hide technical evidence' : 'Show technical evidence'}</span>
+                  </button>
+                  {showTechnicalDetails && (
+                    <span className="text-[9px] text-gray-400 font-mono">
+                      Algorithm Version: v1.4 • Matching Window: {timeWindowMinutes} mins
+                    </span>
+                  )}
+                </div>
+
+                {showTechnicalDetails && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs bg-gray-50 dark:bg-gray-850 p-4 rounded-xl border border-gray-150 dark:border-gray-800 animate-in fade-in duration-200">
+                    <div className="space-y-2">
+                      <span className="font-bold text-gray-700 dark:text-gray-300 block uppercase tracking-wider text-[10px]">
+                        Scoring Breakdown
+                      </span>
+                      <div className="space-y-1.5 font-mono text-[11px]">
+                        <div className="flex justify-between">
+                          <span>Proximity Score:</span>
+                          <span className="font-bold">{assessment?.totalScore || 0} / 100</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span>Time Alignment:</span>
+                          <span className="font-bold">UTC Timeline</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <span className="font-bold text-gray-700 dark:text-gray-300 block uppercase tracking-wider text-[10px]">
+                        Confidence Checks
+                      </span>
+                      <div className="flex flex-col gap-2">
+                        {assessment?.factors?.map((factor: any) => (
+                          <div
+                            key={factor.dimension}
+                            className={`p-2.5 rounded-lg border text-[10px] ${
+                              factor.result === 'PASS'
+                                ? 'bg-green-50/25 border-green-150/40 text-green-800 dark:text-green-450 dark:bg-green-950/10'
+                                : factor.result === 'PARTIAL'
+                                ? 'bg-amber-50/25 border-amber-150/30 text-amber-800 dark:text-amber-450 dark:bg-amber-950/10'
+                                : factor.result === 'SKIP'
+                                ? 'bg-gray-100 border-gray-200 text-gray-500 dark:text-gray-400 dark:bg-gray-800/40 dark:border-gray-800/50'
+                                : 'bg-rose-50/25 border-rose-150/40 text-rose-800 dark:text-rose-450 dark:bg-rose-950/10'
+                            }`}
+                          >
+                            <div className="flex justify-between font-semibold mb-1">
+                              <span className="capitalize">{factor.dimension.replace(/_/g, ' ').toLowerCase()}</span>
+                              <span>{factor.awardedPoints} / {factor.maxPoints} pts</span>
+                            </div>
+                            <p className="opacity-95">{factor.explanation}</p>
+                            <p className="opacity-60 font-mono text-[8px] mt-1">Rule: {factor.rule}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>          </div>
             </div>
 
             {actionMessage && (
