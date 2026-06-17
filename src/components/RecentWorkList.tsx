@@ -141,7 +141,7 @@ export default function RecentWorkList() {
       <div className="space-y-3">
         <div className="flex items-center gap-2">
           <History className="h-4.5 w-4.5 text-gray-400" />
-          <h2 className="text-xs font-bold uppercase tracking-wider text-gray-500">Recent Activity</h2>
+          <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">Continue recent check</h2>
         </div>
 
         <div className="card p-0 overflow-hidden bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 shadow-sm">
@@ -149,17 +149,15 @@ export default function RecentWorkList() {
             <table className="w-full text-left text-xs">
               <thead className="bg-gray-50 dark:bg-gray-850 border-b border-gray-200 dark:border-gray-850">
                 <tr className="text-gray-500 dark:text-gray-400 font-semibold select-none text-[10px] uppercase tracking-wider">
-                  <th className="px-5 py-3">Provider</th>
-                  <th className="px-5 py-3">Source File</th>
-                  <th className="px-5 py-3">Date Uploaded</th>
-                  <th className="px-5 py-3 text-center">Vehicles</th>
+                  <th className="px-5 py-3">File</th>
+                  <th className="px-5 py-3">Type</th>
                   <th className="px-5 py-3 text-center">GPS Files</th>
                   <th className="px-5 py-3 text-center">Status</th>
-                  <th className="px-5 py-3 text-right">Actions</th>
+                  <th className="px-5 py-3 text-right">Continue</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-150 dark:divide-gray-850">
-                {batches.slice(0, 5).map((batch) => {
+                {batches.slice(0, 10).map((batch) => {
                   const gpsCount = batch.attachedGpsFiles?.length || 0;
                   const isAllGps = gpsCount >= batch.vehicles.length;
 
@@ -169,24 +167,17 @@ export default function RecentWorkList() {
                       className="hover:bg-gray-50/50 dark:hover:bg-gray-800/10 transition cursor-pointer"
                       onClick={() => router.push(`/batches?id=${batch.id}`)}
                     >
+                      <td className="px-5 py-3.5 font-semibold text-gray-900 dark:text-white truncate max-w-[240px]" title={batch.filename}>
+                        {batch.filename}
+                      </td>
                       <td className="px-5 py-3.5">
                         <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400">
                           {batch.provider}
                         </span>
                       </td>
-                      <td className="px-5 py-3.5 font-semibold text-gray-900 dark:text-white truncate max-w-[200px]" title={batch.filename}>
-                        {batch.filename}
-                      </td>
-                      <td className="px-5 py-3.5 text-gray-500 font-mono text-[11px]">
-                        {new Date(batch.uploadDate).toLocaleString(undefined, {
-                          dateStyle: 'short',
-                          timeStyle: 'short',
-                        })}
-                      </td>
-                      <td className="px-5 py-3.5 text-center font-bold">{batch.vehicles.length}</td>
                       <td className="px-5 py-3.5 text-center font-medium">
                         <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                          isAllGps ? 'bg-green-100 text-green-800 dark:bg-green-950/20 dark:text-green-400' : 'bg-amber-100 text-amber-800 dark:bg-amber-950/20 dark:text-amber-400'
+                          isAllGps ? 'bg-green-100 text-green-800 dark:bg-green-950/20 dark:text-green-400' : 'bg-amber-100 text-amber-800 dark:bg-amber-955/20 dark:text-amber-400'
                         }`}>
                           {gpsCount} of {batch.vehicles.length}
                         </span>
@@ -197,34 +188,19 @@ export default function RecentWorkList() {
                         </span>
                       </td>
                       <td className="px-5 py-3.5 text-right" onClick={(e) => e.stopPropagation()}>
-                        <div className="flex items-center justify-end gap-2 text-[10px] font-semibold">
+                        <div className="flex items-center justify-end gap-3 text-[10px] font-bold">
                           <Link
-                            href={`/batches?id=${batch.id}&tab=transactions`}
-                            className="hover:text-indigo-600 text-gray-500 dark:text-gray-450 hover:underline"
+                            href={`/batches?id=${batch.id}`}
+                            className="text-indigo-650 dark:text-indigo-400 hover:underline bg-indigo-50 dark:bg-indigo-950/20 px-2.5 py-1 rounded-lg transition"
                           >
-                            Txs
+                            Continue →
                           </Link>
-                          <span className="text-gray-300 dark:text-gray-800">|</span>
-                          <Link
-                            href={`/batches?id=${batch.id}&tab=exceptions`}
-                            className="hover:text-indigo-600 text-gray-500 dark:text-gray-450 hover:underline"
-                          >
-                            Exceptions
-                          </Link>
-                          <span className="text-gray-300 dark:text-gray-800">|</span>
-                          <Link
-                            href={`/batches?id=${batch.id}&tab=approval`}
-                            className="hover:text-indigo-600 text-gray-500 dark:text-gray-450 hover:underline"
-                          >
-                            Approve
-                          </Link>
-                          <span className="text-gray-300 dark:text-gray-800">|</span>
                           <button
                             onClick={(e) => handleExportCSV(batch, e)}
                             className="hover:text-indigo-600 text-gray-550 dark:text-gray-450 hover:underline flex items-center gap-0.5"
+                            title="Download CSV Summary Report"
                           >
-                            <Download className="w-3 h-3" />
-                            Report
+                            <Download className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       </td>

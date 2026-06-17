@@ -143,8 +143,8 @@ export default function EvidenceMatchView({
   };
 
   const handleUpdateStatus = async (status: string) => {
-    if (status === 'overridden' && !reviewerNote.trim()) {
-      setActionMessage('Manual reviewer note required for override.');
+    if (!reviewerNote.trim()) {
+      setActionMessage('Manual reviewer note is required before manually supporting or flagging.');
       return;
     }
 
@@ -224,10 +224,14 @@ export default function EvidenceMatchView({
   const nearestInfo = getNearestPoint();
 
   const getGpsStatusText = (classification: string) => {
+    if (classification === 'overridden' || classification === 'Validated' || classification === 'Marked Supported') return 'Supported';
+    if (classification === 'Needs field review' || classification === 'Flagged Mismatch') return 'Flagged';
+    if (classification === 'Needs Follow Up') return 'Needs review';
+
     if (advancedMode) return classification || 'NO GPS';
     const cl = String(classification || '').toUpperCase();
-    if (cl === 'VERIFIED') return 'Verified';
-    if (cl === 'LIKELY') return 'Likely';
+    if (cl === 'VERIFIED') return 'Supported';
+    if (cl === 'LIKELY') return 'Likely supported';
     if (cl === 'REVIEW' || cl === 'INSUFFICIENT_EVIDENCE') return 'Needs review';
     if (cl === 'UNLIKELY') return 'Unlikely';
     return 'No GPS';
@@ -878,22 +882,22 @@ export default function EvidenceMatchView({
 
                   <div className="flex gap-2">
                     <button
-                      onClick={() => handleUpdateStatus('Validated')}
+                      onClick={() => handleUpdateStatus('Marked Supported')}
                       className="px-3 py-1.5 bg-green-600 hover:bg-green-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1 shadow-sm transition-colors"
                     >
                       <Check className="w-3.5 h-3.5" /> Mark Supported
                     </button>
                     <button
-                      onClick={() => handleUpdateStatus('Needs field review')}
-                      className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1 shadow-sm transition-colors"
+                      onClick={() => handleUpdateStatus('Flagged Mismatch')}
+                      className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1 shadow-sm transition-colors"
                     >
                       <Flag className="w-3.5 h-3.5" /> Flag Issue
                     </button>
                     <button
-                      onClick={() => handleUpdateStatus('overridden')}
-                      className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1 shadow-sm transition-colors"
+                      onClick={() => handleUpdateStatus('Needs Follow Up')}
+                      className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-white rounded-lg text-xs font-semibold flex items-center gap-1 shadow-sm transition-colors"
                     >
-                      <PenTool className="w-3.5 h-3.5" /> Override with reason
+                      <PenTool className="w-3.5 h-3.5" /> Follow Up
                     </button>
                   </div>
                 </div>

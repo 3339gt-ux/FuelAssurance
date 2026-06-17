@@ -138,6 +138,7 @@ function BatchesPageContent() {
   const [advancedMode, setAdvancedMode] = useState<boolean>(false);
   const [showGuide, setShowGuide] = useState<boolean>(true);
   const [showFullGpsSource, setShowFullGpsSource] = useState<boolean>(false);
+  const [rightPanelTab, setRightPanelTab] = useState<'comparison' | 'gps_upload' | 'manual_review'>('comparison');
 
   // Modals for E2E tests
   const [selectedTxForSource, setSelectedTxForSource] = useState<any | null>(null);
@@ -276,10 +277,24 @@ function BatchesPageContent() {
         });
         setTransactions(enrichedTxs);
 
-        // Keep selected transaction reference updated
+        // Keep selected transaction reference updated, or select first unresolved
         if (selectedTransaction) {
           const updatedTx = enrichedTxs.find((t: any) => t.id === selectedTransaction.id);
           if (updatedTx) setSelectedTransaction(updatedTx);
+        } else if (enrichedTxs.length > 0) {
+          const firstUnresolved = enrichedTxs.find((t: any) => 
+            t.status !== 'OK' && t.status !== 'Validated' && t.status !== 'VALIDATED' &&
+            t.telematicsAssessment?.classification !== 'VERIFIED' && t.telematicsAssessment?.classification !== 'LIKELY' &&
+            t.telematicsOverrideStatus !== 'Marked Supported' && t.telematicsOverrideStatus !== 'Manually Approved'
+          );
+          setSelectedTransaction(firstUnresolved || enrichedTxs[0]);
+        }
+
+        // Set right panel tab state based on GPS files availability
+        if (mappedBatch.attachedGpsFiles && mappedBatch.attachedGpsFiles.length > 0) {
+          setRightPanelTab('comparison');
+        } else {
+          setRightPanelTab('gps_upload');
         }
       }
     } catch (err) {
@@ -294,8 +309,8 @@ function BatchesPageContent() {
     if (batchIdParam) {
       setSelectedBatchId(batchIdParam);
       fetchBatchDetails(batchIdParam);
-      // Auto transition to Step 2 when batch loaded
-      setActiveStep((s) => (s === 1 ? 2 : s));
+      // Auto transition to Step 4 comparison workspace
+      setActiveStep(4);
     } else {
       setSelectedBatchId(null);
       setActiveBatch(null);
@@ -303,7 +318,7 @@ function BatchesPageContent() {
       setSelectedTransaction(null);
       setActiveStep(1);
     }
-  }, [batchIdParam]);
+  }, [batchIdParam, fetchBatchDetails]);
 
   const buildCombinedLocationText = (pt: any) => {
     if (!pt) return '';
@@ -793,6 +808,88 @@ function BatchesPageContent() {
     }
   };
 
+  const getNextActionText = () => {
+    if (!activeBatch) return '';
+    if (!activeBatch.attachedGpsFiles || activeBatch.attachedGpsFiles.length === 0) {
+      return 'Upload GPS data';
+    }
+    const unresolvedCount = getUnresolvedBlockingIssuesCount();
+    if (unresolvedCount > 0) {
+      return 'Review GPS issues';
+    }
+    return 'Approve invoice';
+  };
+
+  const handleReviewFirstIssue = () => {
+    if (!transactions.length) return;
+    const firstUnresolved = transactions.find((t: any) => 
+      t.status !== 'OK' && t.status !== 'Validated' && t.status !== 'VALIDATED' &&
+      t.telematicsAssessment?.classification !== 'VERIFIED' && t.telematicsAssessment?.classification !== 'LIKELY' &&
+      t.telematicsOverrideStatus !== 'Marked Supported' && t.telematicsOverrideStatus !== 'Manually Approved'
+    );
+    setSelectedTransaction(firstUnresolved || transactions[0]);
+    setRightPanelTab('comparison');
+  };
+
+  const getGpsSaysText = () => {
+    if (!selectedTransaction) return 'No transaction selected.';
+    if (selectedTransaction.telematicsOverrideStatus === 'Marked Supported') {
+      return `Vehicle GPS history manually supported: ${selectedTransaction.reviewerNote || 'Approved override'}`;
+    }
+    if (selectedTransaction.telematicsOverrideStatus === 'Flagged Mismatch') {
+      return `Vehicle GPS history flagged as mismatch: ${selectedTransaction.reviewerNote || 'Flagged issue'}`;
+    }
+    if (selectedTransaction.telematicsOverrideStatus === 'Needs Follow Up') {
+      return `Needs follow-up review: ${selectedTransaction.reviewerNote || 'Pending details'}`;
+    }
+    if (!selectedTxEvidence) return 'Loading GPS data...';
+    
+    const pts = selectedTxEvidence.pointsInWindow || [];
+    const txTime = new Date(selectedTransaction.transactionTimestamp || selectedTransaction.transactionDateTime).getTime();
+    let nearest = null;
+    let minDiff = Infinity;
+    for (const pt of pts) {
+      const diff = Math.abs(new Date(pt.timestamp).getTime() - txTime);
+      if (diff < minDiff) {
+        minDiff = diff;
+        nearest = pt;
+      }
+    }
+    if (!nearest) nearest = selectedTxEvidence.beforePoint || selectedTxEvidence.afterPoint;
+    
+    if (!nearest) {
+      return 'No GPS point found within ±30 minutes. Try a wider window, upload more GPS, or manually review GPS history.';
+    }
+
+    const diffMins = Math.round(Math.abs(new Date(nearest.timestamp).getTime() - txTime) / 60000);
+    const isBefore = new Date(nearest.timestamp).getTime() < txTime;
+    const diffText = `${diffMins} minutes ${isBefore ? 'before' : 'after'}`;
+
+    const location = buildCombinedLocationText(nearest) || selectedTransaction.stationCity || selectedTransaction.stationName || 'the forecourt';
+
+    // Check fuel levels
+    let fuelInfo = '';
+    const fuels = pts.map((p: any) => p.fuelLevelPercent).filter((f: any) => f !== null && f !== undefined);
+    if (fuels.length > 1) {
+      const minF = Math.round(Math.min(...fuels));
+      const maxF = Math.round(Math.max(...fuels));
+      if (maxF > minF) {
+        fuelInfo = ` Fuel increased from ${minF}% to ${maxF}%.`;
+      } else {
+        fuelInfo = ` Fuel level was stable at ${minF}%.`;
+      }
+    } else if (nearest.fuelLevelPercent !== null && nearest.fuelLevelPercent !== undefined) {
+      fuelInfo = ` Fuel level was ${Math.round(nearest.fuelLevelPercent)}%.`;
+    }
+
+    if (selectedTransaction.telematicsAssessment?.classification === 'VERIFIED' || selectedTransaction.telematicsAssessment?.classification === 'LIKELY') {
+      return `Vehicle was near ${location} ${diffMins} minutes ${isBefore ? 'before' : 'after'} the invoice time.${fuelInfo}`;
+    }
+
+    return `No GPS point found near this time. Nearest available point: ${diffMins}m away at ${location}.`;
+  };
+
+
   // Stepper validation checkers
   const getUnresolvedBlockingIssuesCount = () => {
     const unsupportedCount = transactions.filter(t => 
@@ -908,82 +1005,10 @@ function BatchesPageContent() {
   };
 
   return (
-    <div className="max-w-[1600px] mx-auto py-4 px-4 space-y-4 text-slate-800 dark:text-slate-200 animate-fade-in">
-      
-      {/* ─── WORKSPACE STEPPER HEADER ─── */}
-      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm p-4">
-        <div className="flex flex-wrap items-center justify-between gap-4 pb-3 border-b border-slate-100 dark:border-slate-800">
-          <div>
-            <h1 className="text-xl font-black text-slate-900 dark:text-white flex items-center gap-2 tracking-tight">
-              <Layers className="h-5.5 w-5.5 text-indigo-600 dark:text-indigo-400" />
-              Fuel Assurance Review Workspace
-            </h1>
-            <p className="text-[11px] text-slate-500 mt-0.5">
-              Verify fuel invoices and transaction sheets against vehicle GPS telemetry logs.
-            </p>
-          </div>
-          <div className="flex items-center gap-3">
-            {/* Advanced mode switch */}
-            <button
-              onClick={toggleAdvancedMode}
-              className={`py-1 px-2.5 rounded-lg text-2xs font-semibold flex items-center gap-1 border transition-all ${
-                advancedMode 
-                  ? 'bg-indigo-600 border-indigo-600 text-white shadow-glow' 
-                  : 'bg-white border-slate-200 hover:border-slate-350 dark:bg-slate-800 dark:border-slate-700 text-slate-600 dark:text-slate-300'
-              }`}
-              title="Toggle Advanced auditor tools"
-            >
-              <Settings2 className="w-3.5 h-3.5" />
-              Advanced Mode: {advancedMode ? 'Active' : 'Off'}
-            </button>
-            <button
-              onClick={toggleDensity}
-              className="py-1 px-2.5 bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 rounded-lg text-2xs font-semibold text-slate-600 dark:text-slate-300"
-            >
-              Density: {density === 'compact' ? 'Compact' : 'Comfortable'}
-            </button>
-          </div>
-        </div>
-
-        {/* Visual Stepper bar */}
-        <div className="grid grid-cols-5 gap-2 mt-4 text-xs font-bold text-center">
-          {[
-            { step: 1, label: '1. Upload Invoice', desc: 'DKV Excel, PDF or AS24 PDF' },
-            { step: 2, label: '2. Review Extraction', desc: 'Verify parsed transactions' },
-            { step: 3, label: '3. Upload GPS', desc: 'Attach vehicle telemetry' },
-            { step: 4, label: '4. Compare GPS', desc: 'Validate overlap evidence' },
-            { step: 5, label: '5. Approve / Flag', desc: 'Sign-off audit run' },
-          ].map((s) => {
-            const isClickable = activeBatch !== null || s.step === 1;
-            const isActive = activeStep === s.step;
-            const isCompleted = activeBatch !== null && s.step < activeStep;
-            return (
-              <button
-                key={s.step}
-                disabled={!isClickable}
-                onClick={() => {
-                  setActiveStep(s.step);
-                  setSelectedTransaction(null);
-                }}
-                className={`p-2 rounded-xl border-2 text-left transition ${
-                  isActive
-                    ? 'border-indigo-600 bg-indigo-50/20 text-indigo-700 dark:text-indigo-400'
-                    : isCompleted
-                    ? 'border-emerald-600/40 bg-emerald-50/5 text-emerald-700 dark:text-emerald-500'
-                    : 'border-slate-100 dark:border-slate-800 text-slate-400'
-                } disabled:opacity-55`}
-              >
-                <span className="block text-[11px] font-black">{s.label}</span>
-                <span className="block text-[9px] text-slate-450 mt-0.5 font-normal truncate">{s.desc}</span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* ─── STICKY ACTION BAR (ONLY IF BATCH LOADED) ─── */}
-      {activeBatch && (
-        <div className="sticky top-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur border border-slate-200 dark:border-slate-800 rounded-2xl shadow-md p-3.5 flex flex-wrap items-center justify-between gap-4 animate-slide-down">
+    <div className="max-w-[1600px] mx-auto py-4 px-4 space-y-4 text-slate-800 dark:text-slate-200 animate-fade-in">      {/* ─── WORKSPACE TOP BAR (Current job + next action + actions) ─── */}
+      {activeBatch ? (
+        <div className="sticky top-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur border border-slate-200 dark:border-slate-800 rounded-2xl shadow-md p-4 flex flex-wrap items-center justify-between gap-4 animate-slide-down">
+          {/* Left side: Job details & next action */}
           <div className="flex items-center gap-3">
             <button
               onClick={() => router.push('/batches')}
@@ -993,106 +1018,133 @@ function BatchesPageContent() {
               <ChevronLeft className="w-5 h-5" />
             </button>
             <div>
-              <h2 className="text-xs font-black text-slate-900 dark:text-white flex items-center gap-1.5">
-                {activeBatch.filename}
-                <span className="text-[9px] px-1.5 py-0.5 rounded-full font-bold bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-400">
-                  {activeBatch.provider}
+              <div className="flex items-center gap-2 text-xs font-semibold text-slate-550 dark:text-slate-400">
+                <span className="font-extrabold text-slate-900 dark:text-white text-sm">
+                  {activeBatch.provider} Statement
                 </span>
-                <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 font-semibold truncate max-w-[150px]">
-                  {activeBatch.sourceType}
+                <span>·</span>
+                <span>{transactions.length} transactions</span>
+                <span>·</span>
+                <span>{activeBatch.attachedGpsFiles?.length || 0} GPS files</span>
+                <span>·</span>
+                <span className={getUnresolvedBlockingIssuesCount() > 0 ? 'text-amber-600 font-extrabold bg-amber-50 dark:bg-amber-950/20 px-2 py-0.5 rounded' : 'text-green-600 font-extrabold bg-green-50 dark:bg-green-950/20 px-2 py-0.5 rounded'}>
+                  {getUnresolvedBlockingIssuesCount()} need review
                 </span>
-              </h2>
-              <div className="flex items-center gap-2 text-[9px] text-slate-400 font-semibold uppercase mt-0.5 tracking-wider">
-                <span>Value: {formatExVatSum(activeBatch)}</span>
-                <span>•</span>
-                <span>Txs: {transactions.length} rows</span>
-                <span>•</span>
-                <span>GPS files: {activeBatch.attachedGpsFiles?.length || 0}</span>
-                <span>•</span>
-                <span>Issues: {getUnresolvedBlockingIssuesCount()} unresolved</span>
+              </div>
+              <div className="text-[11px] font-extrabold text-indigo-600 dark:text-indigo-400 flex items-center gap-1 mt-1">
+                <ArrowRight className="w-3.5 h-3.5" />
+                {getNextActionText()}
               </div>
             </div>
           </div>
 
+          {/* Right side: Action buttons */}
           <div className="flex items-center gap-2 flex-wrap">
             <button
-              onClick={() => {
-                router.push('/batches');
-                setActiveStep(1);
-              }}
-              className="py-1 px-3 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 rounded-lg text-2xs font-semibold text-slate-600 dark:text-slate-300"
-            >
-              Upload More
-            </button>
-            <button
-              onClick={handleConfirmBatch}
-              className="py-1 px-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-2xs font-semibold flex items-center gap-1 transition shadow-sm"
-            >
-              <Check className="w-3 h-3" />
-              Confirm Extracted Data
-            </button>
-            <button
-              onClick={() => setActiveStep(3)}
-              className={`py-1 px-3 border rounded-lg text-2xs font-semibold ${
-                activeStep === 3 ? 'bg-indigo-50 border-indigo-300 text-indigo-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'
+              onClick={() => setRightPanelTab('gps_upload')}
+              className={`py-1.5 px-3 border rounded-lg text-2xs font-extrabold transition ${
+                rightPanelTab === 'gps_upload'
+                  ? 'bg-indigo-50 border-indigo-300 text-indigo-750 dark:bg-indigo-950/20 dark:text-indigo-400 font-sans'
+                  : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-350 hover:bg-slate-50 dark:hover:bg-slate-800'
               }`}
             >
               Upload GPS
             </button>
             <button
-              onClick={() => setActiveStep(4)}
-              className={`py-1 px-3 border rounded-lg text-2xs font-semibold ${
-                activeStep === 4 ? 'bg-indigo-50 border-indigo-300 text-indigo-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-              }`}
+              onClick={async () => {
+                setLoadingBatchData(true);
+                await fetchBatchDetails(activeBatch.id);
+                alert('Checks updated successfully!');
+              }}
+              className="py-1.5 px-3 border border-slate-200 dark:border-slate-700 text-slate-650 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 rounded-lg text-2xs font-extrabold transition"
             >
-              Run Comparison
+              Run check
             </button>
             <button
-              onClick={() => setActiveStep(5)}
-              className={`py-1 px-3 border rounded-lg text-2xs font-semibold ${
-                activeStep === 5 ? 'bg-indigo-50 border-indigo-300 text-indigo-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-              }`}
+              onClick={handleReviewFirstIssue}
+              className="py-1.5 px-3 bg-amber-500 hover:bg-amber-400 text-white rounded-lg text-2xs font-extrabold transition shadow-sm"
             >
-              Approve / Flag
+              Review issues
+            </button>
+            <button
+              onClick={handleConfirmBatch}
+              className="py-1.5 px-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-2xs font-extrabold transition shadow-sm"
+            >
+              Confirm Extracted Data
+            </button>
+            <button
+              disabled={getUnresolvedBlockingIssuesCount() > 0}
+              onClick={handleConfirmBatch}
+              className="py-1.5 px-3 bg-green-600 hover:bg-green-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg text-2xs font-extrabold transition shadow-sm"
+            >
+              Approve
             </button>
             <button
               onClick={handleExportCSV}
-              className="py-1 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 rounded-lg text-2xs font-semibold flex items-center gap-1 transition"
+              className="py-1.5 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 rounded-lg text-2xs font-extrabold transition"
             >
-              <Download className="w-3 h-3" />
               Export
             </button>
+
+            {/* Toggle row density button for E2E tests compatibility */}
             <button
               onClick={toggleDensity}
-              className="p-1 border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800 rounded-lg text-slate-500 dark:text-slate-400"
+              className="p-1.5 border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800 rounded-lg text-slate-500 dark:text-slate-400"
               title={`Toggle row density (Currently: ${density})`}
             >
               <Settings className="w-4 h-4" />
             </button>
+
+            {/* Advanced mode switch */}
+            <div className="h-6 w-px bg-slate-250 dark:bg-slate-800 mx-1"></div>
+            <button
+              onClick={toggleAdvancedMode}
+              className={`py-1.5 px-2.5 rounded-lg text-2xs font-extrabold flex items-center gap-1 border transition-all ${
+                advancedMode 
+                  ? 'bg-indigo-600 border-indigo-600 text-white shadow-glow' 
+                  : 'bg-white border-slate-200 hover:border-slate-350 dark:bg-slate-800 dark:border-slate-700 text-slate-600 dark:text-slate-300'
+              }`}
+              title="Toggle Advanced Mode"
+            >
+              <Settings2 className="w-3.5 h-3.5" />
+              {advancedMode ? 'Advanced Mode: ON' : 'Advanced Mode: OFF'}
+            </button>
           </div>
         </div>
-      )}
-
-      {activeBatch && showGuide && (
-        <div className="bg-indigo-50 dark:bg-indigo-950/45 border border-indigo-150 dark:border-indigo-800/40 rounded-2xl p-3 px-4 flex items-start justify-between gap-3 text-xs leading-normal animate-fade-in shadow-sm">
-          <div className="flex gap-2">
-            <Info className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0 mt-0.5" />
+      ) : (
+        /* If no batch loaded, show standard title/stepper for ingestion step */
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm p-4">
+          <div className="flex flex-wrap items-center justify-between gap-4 pb-3 border-b border-slate-100 dark:border-slate-800">
             <div>
-              <span className="font-extrabold text-indigo-950 dark:text-indigo-300">What to do next:</span>
-              <ol className="list-decimal pl-4 mt-0.5 space-y-0.5 text-indigo-900/90 dark:text-indigo-350 text-[11px]">
-                <li>Check the extracted transactions in the list on the left.</li>
-                <li>Upload GPS files for the vehicles under Step 3 (Upload GPS).</li>
-                <li>Click <strong>Compare</strong> (or click a row) on rows needing review to check proximity evidence.</li>
-                <li>Approve the invoice when all issues are resolved.</li>
-              </ol>
+              <h1 className="text-xl font-black text-slate-900 dark:text-white flex items-center gap-2 tracking-tight">
+                <Layers className="h-5.5 w-5.5 text-indigo-600 dark:text-indigo-400" />
+                Fuel Assurance Review Workspace
+              </h1>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Verify fuel invoices and transaction sheets against vehicle GPS telemetry logs.
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={toggleAdvancedMode}
+                className={`py-1 px-2.5 rounded-lg text-2xs font-semibold flex items-center gap-1 border transition-all ${
+                  advancedMode 
+                    ? 'bg-indigo-600 border-indigo-600 text-white shadow-glow' 
+                    : 'bg-white border-slate-200 hover:border-slate-350 dark:bg-slate-800 dark:border-slate-700 text-slate-650 dark:text-slate-300'
+                }`}
+                title="Toggle Advanced Mode"
+              >
+                <Settings2 className="w-3.5 h-3.5" />
+                Advanced Mode: {advancedMode ? 'Active' : 'Off'}
+              </button>
+              <button
+                onClick={toggleDensity}
+                className="py-1 px-2.5 bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 rounded-lg text-2xs font-semibold text-slate-600 dark:text-slate-300"
+              >
+                Density: {density === 'compact' ? 'Compact' : 'Comfortable'}
+              </button>
             </div>
           </div>
-          <button
-            onClick={handleDismissGuide}
-            className="text-[10px] font-bold text-indigo-600 hover:text-indigo-700 dark:text-indigo-400 dark:hover:text-indigo-300 shrink-0"
-          >
-            Dismiss
-          </button>
         </div>
       )}
 
@@ -1743,583 +1795,513 @@ function BatchesPageContent() {
             {/* STEP 4: SIDE-BY-SIDE COMPARE */}
             {activeStep === 4 && (
               <div className="space-y-4 animate-fade-in flex-1 flex flex-col justify-between">
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
-                    <span className="text-xs font-bold uppercase tracking-wider text-slate-450">
-                      Step 4: GPS Evidence Reconciliation
-                    </span>
-                    {selectedTransaction && (
-                      <span className={`px-2 py-0.5 rounded text-3xs font-extrabold ${
-                        selectedTransaction.telematicsAssessment?.classification === 'VERIFIED'
-                          ? 'bg-green-150 text-green-700'
-                          : 'bg-amber-150 text-amber-700'
-                      }`}>
-                        {selectedTransaction.telematicsAssessment?.classification || 'NO GPS'}
-                      </span>
-                    )}
+                {!selectedTransaction ? (
+                  <div className="py-20 text-center text-slate-400 space-y-2">
+                    <Satellite className="w-10 h-10 mx-auto text-slate-350 animate-bounce" />
+                    <p className="text-xs font-semibold">Select a transaction on the left</p>
+                    <p className="text-[10px] text-slate-500">We will extract the corresponding timeline logs, odometer records, and fuel tank levels.</p>
                   </div>
-
-                  {!selectedTransaction ? (
-                    <div className="py-20 text-center text-slate-400 space-y-2">
-                      <Satellite className="w-10 h-10 mx-auto text-slate-300 animate-bounce" />
-                      <p className="text-xs font-semibold">Select a transaction on the left</p>
-                      <p className="text-[10px] text-slate-500">We will extract the corresponding timeline logs, odometer records, and fuel tank levels.</p>
-                    </div>
-                  ) : loadingEvidence ? (
-                    <div className="py-20 text-center text-slate-400 space-y-2">
-                      <Loader2 className="w-8 h-8 mx-auto text-indigo-500 animate-spin" />
-                      <p className="text-xs font-semibold">Extracting telemetry logs...</p>
-                    </div>
-                  ) : showManualGpsReview ? (
-                    // ─── MANUAL GPS REVIEW PANEL ───
-                    <div className="space-y-4 text-xs animate-fade-in">
-                      <div className="flex justify-between items-center border-b border-slate-100 dark:border-slate-800 pb-2">
-                        <span className="font-bold text-slate-850 dark:text-white text-sm flex items-center gap-1.5">
-                          <Satellite className="w-4 h-4 text-purple-600" />
-                          Manual GPS Review & Search
-                        </span>
+                ) : loadingEvidence ? (
+                  <div className="py-20 text-center text-slate-400 space-y-2">
+                    <Loader2 className="w-8 h-8 mx-auto text-indigo-500 animate-spin" />
+                    <p className="text-xs font-semibold">Extracting telemetry logs...</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4 flex-1 flex flex-col justify-between">
+                    <div className="space-y-4">
+                      {/* Tab Navigation */}
+                      <div className="flex border-b border-slate-100 dark:border-slate-800 text-xs font-semibold select-none mb-3">
                         <button
-                          onClick={() => { setShowManualGpsReview(false); setSelectedGpsRow(null); }}
-                          className="text-2xs bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 px-2.5 py-1 rounded-lg font-bold transition"
+                          onClick={() => setRightPanelTab('comparison')}
+                          className={`flex-1 pb-2 text-center border-b-2 transition ${
+                            rightPanelTab === 'comparison'
+                              ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400 font-extrabold'
+                              : 'border-transparent text-slate-400 hover:text-slate-600'
+                          }`}
                         >
-                          Back to Evidence
+                          Comparison
+                        </button>
+                        <button
+                          onClick={() => setRightPanelTab('manual_review')}
+                          className={`flex-1 pb-2 text-center border-b-2 transition ${
+                            rightPanelTab === 'manual_review'
+                              ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400 font-extrabold'
+                              : 'border-transparent text-slate-400 hover:text-slate-600'
+                          }`}
+                        >
+                          Manual GPS Review
+                        </button>
+                        <button
+                          onClick={() => setRightPanelTab('gps_upload')}
+                          className={`flex-1 pb-2 text-center border-b-2 transition ${
+                            rightPanelTab === 'gps_upload'
+                              ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400 font-extrabold'
+                              : 'border-transparent text-slate-400 hover:text-slate-600'
+                          }`}
+                        >
+                          Ingest GPS
                         </button>
                       </div>
 
-                      {/* Search Controls */}
-                      <div className="bg-slate-50 dark:bg-slate-850 border border-slate-200 dark:border-slate-800 rounded-2xl p-3.5 space-y-3 shadow-sm">
-                        <div className="grid grid-cols-2 md:grid-cols-3 gap-2.5">
-                          <div>
-                            <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider mb-1">Vehicle</label>
-                            <select
-                              value={manualVehicle}
-                              onChange={(e) => setManualVehicle(e.target.value)}
-                              className="w-full text-xs p-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl focus:outline-none"
-                            >
-                              <option value="">Select Vehicle</option>
-                              {activeBatch.vehicles.map(v => (
-                                <option key={v} value={v}>{v}</option>
-                              ))}
-                            </select>
-                          </div>
-                          <div>
-                            <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider mb-1">Date</label>
-                            <input
-                              type="date"
-                              value={manualDate}
-                              onChange={(e) => setManualDate(e.target.value)}
-                              className="w-full text-xs p-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl focus:outline-none"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider mb-1">Time</label>
-                            <input
-                              type="time"
-                              value={manualTime}
-                              onChange={(e) => setManualTime(e.target.value)}
-                              className="w-full text-xs p-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl focus:outline-none"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider mb-1">Window</label>
-                            <select
-                              value={manualWindow}
-                              onChange={(e) => setManualWindow(e.target.value)}
-                              className="w-full text-xs p-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl focus:outline-none"
-                            >
-                              <option value="15">±15 minutes</option>
-                              <option value="30">±30 minutes</option>
-                              <option value="60">±60 minutes</option>
-                              <option value="120">±2 hours</option>
-                              <option value="day">Full day</option>
-                            </select>
-                          </div>
-                          <div className="col-span-2">
-                            <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider mb-1">Location contains</label>
-                            <input
-                              type="text"
-                              placeholder="City, street, or country..."
-                              value={manualLocationSearch}
-                              onChange={(e) => setManualLocationSearch(e.target.value)}
-                              className="w-full text-xs p-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl focus:outline-none"
-                            />
-                          </div>
-                        </div>
+                      {/* Tab 1: comparison */}
+                      {rightPanelTab === 'comparison' && (
+                        <div className="space-y-4 animate-fade-in text-xs">
+                          {/* Card 1 — Invoice says */}
+                          <div className="bg-slate-50 dark:bg-slate-850 border border-slate-200 dark:border-slate-800 rounded-xl p-3.5 space-y-2">
+                            <h3 className="font-extrabold text-[11px] uppercase tracking-wider text-slate-450">Invoice says</h3>
+                            <div className="grid grid-cols-2 gap-y-1.5 text-2xs">
+                              <div><span className="text-slate-400">Vehicle:</span> <strong className="font-mono text-slate-800 dark:text-slate-200">{selectedTransaction.registration || selectedTransaction.vehicleRegistration || '—'}</strong></div>
+                              <div><span className="text-slate-400">Time:</span> <strong className="font-mono text-slate-800 dark:text-slate-200">{selectedTransaction.transactionTimestamp ? new Date(selectedTransaction.transactionTimestamp).toISOString().replace('T', ' ').slice(0, 16) : selectedTransaction.transactionDateTime || '—'}</strong></div>
+                              <div><span className="text-slate-400">Product:</span> <strong className="text-slate-805 dark:text-slate-250">{selectedTransaction.productName || selectedTransaction.productType || '—'}</strong></div>
+                              <div><span className="text-slate-400">Volume:</span> <strong className="font-mono text-slate-805 dark:text-slate-250">{parseFloat(selectedTransaction.quantity || selectedTransaction.volume || '0').toFixed(2)} L</strong></div>
+                              <div><span className="text-slate-400">Net:</span> <strong className="font-mono text-slate-805 dark:text-slate-250">€{parseFloat(selectedTransaction.paymentAmountExVat || selectedTransaction.baseValueNet || selectedTransaction.valueOfPurchaseNet || '0').toFixed(2)}</strong></div>
+                              <div><span className="text-slate-400">Discount:</span> <strong className="font-mono text-emerald-650 dark:text-emerald-400">€{parseFloat(selectedTransaction.discountNet || selectedTransaction.rebate || '0').toFixed(2)}</strong></div>
+                              <div className="col-span-2"><span className="text-slate-400">Location:</span> <strong className="text-slate-805 dark:text-slate-250">{selectedTransaction.stationCity || selectedTransaction.stationName || '—'}</strong></div>
+                            </div>
 
-                        <button
-                          onClick={handleManualSearch}
-                          className="w-full py-1.5 bg-purple-650 hover:bg-purple-600 text-white rounded-xl font-bold flex items-center justify-center gap-1.5 shadow-sm transition"
-                        >
-                          <Search className="w-4 h-4" /> Search GPS History
-                        </button>
-                      </div>
+                            {selectedTransaction.sourceEvidence && (
+                              <div className="border-t border-slate-200 dark:border-slate-800 pt-2 mt-2">
+                                {selectedTransaction.sourceEvidence.sourceType?.includes('PDF') ? (
+                                  <div className="w-full bg-white dark:bg-slate-900 rounded border border-slate-150 dark:border-slate-800 overflow-hidden flex justify-center py-2">
+                                    <PDFPageRenderer
+                                      fileId={selectedTransaction.sourceEvidence.sourceFileId}
+                                      pageNumber={selectedTransaction.sourceEvidence.pageNumber}
+                                      boundingBox={selectedTransaction.sourceEvidence.boundingBox}
+                                      crop={true}
+                                      scale={1.1}
+                                    />
+                                  </div>
+                                ) : (
+                                  <div className="p-2 bg-white dark:bg-slate-900 border border-slate-150 dark:border-slate-800 rounded font-mono text-[9px] truncate max-w-full">
+                                    {selectedTransaction.sourceEvidence.rawText || 'No source details.'}
+                                  </div>
+                                )}
+                                <div className="text-right mt-1.5">
+                                  <button
+                                    onClick={() => setSelectedTxForSource(selectedTransaction)}
+                                    className="px-2.5 py-1 bg-white hover:bg-slate-50 border border-slate-250 rounded text-3xs font-bold text-indigo-600 dark:text-indigo-400 dark:bg-slate-850 dark:hover:bg-slate-800 transition"
+                                  >
+                                    Open source
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
 
-                      {/* Results List */}
-                      {manualResults.length > 0 && (
-                        <div className="space-y-1.5">
-                          <span className="font-bold text-[10px] text-slate-450 uppercase tracking-wider block">GPS History Search Results ({manualResults.length})</span>
-                          <div className="border border-slate-150 dark:border-slate-800 rounded-xl overflow-hidden max-h-40 overflow-y-auto">
-                            <table className="w-full text-left border-collapse text-3xs">
-                              <thead>
-                                <tr className="bg-slate-50 dark:bg-slate-850 text-slate-500 font-semibold border-b border-slate-150">
-                                  <th className="p-1.5">Time</th>
-                                  <th className="p-1.5">Δ from invoice</th>
-                                  <th className="p-1.5">Vehicle</th>
-                                  <th className="p-1.5">Location text</th>
-                                  <th className="p-1.5 text-right">Fuel</th>
-                                  <th className="p-1.5 text-right">KM</th>
-                                  <th className="p-1.5">Status</th>
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y divide-slate-100 dark:divide-slate-850 font-mono">
-                                {manualResults.map((pt: any) => {
-                                  const ptTime = new Date(pt.timestamp).getTime();
-                                  const txTime = new Date(selectedTransaction.transactionTimestamp || selectedTransaction.transactionDateTime).getTime();
-                                  const diffMins = Math.round((ptTime - txTime) / 60000);
-                                  const diffText = diffMins === 0 ? 'exact match' : diffMins < 0 ? `${Math.abs(diffMins)}m before` : `${diffMins}m after`;
-                                  const isSelected = selectedGpsRow?.id === pt.id;
-                                  
-                                  return (
-                                    <tr
-                                      key={pt.id}
-                                      onClick={() => setSelectedGpsRow(pt)}
-                                      className={`hover:bg-slate-50/50 dark:hover:bg-slate-800/30 cursor-pointer ${
-                                        isSelected ? 'bg-purple-50/30 dark:bg-purple-950/20 font-bold border-l-2 border-l-purple-500' : ''
-                                      }`}
-                                    >
-                                      <td className="p-1.5 whitespace-nowrap">{new Date(pt.timestamp).toLocaleTimeString()}</td>
-                                      <td className="p-1.5 whitespace-nowrap font-sans">{diffText}</td>
-                                      <td className="p-1.5 whitespace-nowrap">{pt.vehicleRegistration}</td>
-                                      <td className="p-1.5 truncate max-w-[140px]" title={buildCombinedLocationText(pt)}>{buildCombinedLocationText(pt)}</td>
-                                      <td className="p-1.5 text-right">{pt.fuelLevelPercent !== null ? `${Math.round(pt.fuelLevelPercent)}%` : '—'}</td>
-                                      <td className="p-1.5 text-right">{pt.odometerKm ?? '—'}</td>
-                                      <td className="p-1.5 whitespace-nowrap font-sans">{pt.activity || (pt.speedKmh > 0 ? 'driving' : 'stopped')}</td>
-                                    </tr>
-                                  );
-                                })}
-                              </tbody>
-                            </table>
+                          {/* Card 2 — GPS says */}
+                          <div className="bg-slate-50 dark:bg-slate-850 border border-slate-200 dark:border-slate-800 rounded-xl p-3.5 space-y-2">
+                            <h3 className="font-extrabold text-[11px] uppercase tracking-wider text-slate-450">GPS says</h3>
+                            
+                            <p className="text-2xs font-bold text-slate-805 dark:text-slate-200 leading-normal bg-white dark:bg-slate-900 p-2 border border-slate-150 dark:border-slate-800 rounded-lg">
+                              {getGpsSaysText()}
+                            </p>
+
+                            {geocodedCoords && geocodedCoords.lat && geocodedCoords.lon ? (
+                              <div className="space-y-1 bg-white dark:bg-slate-900 border border-slate-150 dark:border-slate-800 rounded-xl p-1.5 shadow-sm">
+                                <div className="flex justify-between items-center text-[9px] text-slate-400 px-0.5 pb-0.5">
+                                  <span className="font-semibold uppercase tracking-wider flex items-center gap-1">
+                                    <MapPin className="w-3 h-3 text-indigo-500" />
+                                    {geocodedCoords.type === 'exact' ? 'Exact location from GPS coordinates' : 'Approximate location from GPS text'}
+                                  </span>
+                                </div>
+                                <iframe
+                                  width="100%"
+                                  height="120"
+                                  frameBorder="0"
+                                  scrolling="no"
+                                  marginHeight={0}
+                                  marginWidth={0}
+                                  src={`https://www.openstreetmap.org/export/embed.html?bbox=${geocodedCoords.lon - 0.01}%2C${geocodedCoords.lat - 0.005}%2C${geocodedCoords.lon + 0.01}%2C${geocodedCoords.lat + 0.005}&layer=mapnik&marker=${geocodedCoords.lat}%2C${geocodedCoords.lon}`}
+                                  className="rounded border border-slate-150"
+                                ></iframe>
+                                {geocodedCoords.type === 'approximate' && (
+                                  <p className="text-[9px] text-amber-600 dark:text-amber-400 font-medium leading-normal px-0.5">
+                                    ⚠️ This is approximate. The GPS file did not provide exact coordinates.
+                                  </p>
+                                )}
+                              </div>
+                            ) : (
+                              <div className="p-3 bg-white dark:bg-slate-900 border rounded-xl text-center text-3xs text-slate-400 font-sans space-y-1">
+                                <MapPin className="w-6 h-6 text-slate-350 mx-auto" />
+                                <strong className="text-slate-605 block">
+                                  {geocodedCoords?.type === 'text_only' ? 'Location text only — map marker unavailable' : 'Map unavailable'}
+                                </strong>
+                                {geocodedCoords?.combinedText && (
+                                  <p className="text-slate-500 font-semibold">{geocodedCoords.combinedText}</p>
+                                )}
+                              </div>
+                            )}
+
+                            <div className="flex gap-2 justify-end mt-1.5">
+                              <button
+                                onClick={() => setRightPanelTab('manual_review')}
+                                className="px-2.5 py-1 bg-white hover:bg-slate-50 border border-slate-250 rounded text-3xs font-bold text-indigo-650 transition"
+                              >
+                                Search GPS history
+                              </button>
+                              <button
+                                title="Compare vs GPS"
+                                onClick={() => setSelectedTxForMatch(selectedTransaction)}
+                                className="px-2.5 py-1 bg-white hover:bg-slate-50 border border-slate-250 rounded text-3xs font-bold text-indigo-650 transition"
+                              >
+                                Full comparison
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Card 3 — Decision */}
+                          <div className="bg-slate-50 dark:bg-slate-850 border border-slate-205 dark:border-slate-800 rounded-xl p-3.5 space-y-2">
+                            <h3 className="font-extrabold text-[11px] uppercase tracking-wider text-slate-455">Decision</h3>
+                            
+                            <div className="flex items-center justify-between">
+                              <span className="text-2xs font-semibold text-slate-655">Current status:</span>
+                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                selectedTransaction.telematicsOverrideStatus ? 'bg-indigo-50 text-indigo-705 border border-indigo-200 dark:bg-indigo-950/20' :
+                                selectedTransaction.telematicsAssessment?.classification === 'VERIFIED' ? 'bg-green-50 text-green-700 border border-green-200 dark:bg-green-955/10' :
+                                selectedTransaction.telematicsAssessment?.classification === 'LIKELY' ? 'bg-green-50 text-green-705 border border-green-200 dark:bg-green-955/10' :
+                                'bg-amber-50 text-amber-705 border border-amber-200 dark:bg-amber-955/10'
+                              }`}>
+                                {selectedTransaction.telematicsOverrideStatus ? selectedTransaction.telematicsOverrideStatus :
+                                 selectedTransaction.telematicsAssessment?.classification === 'VERIFIED' ? 'Supported' :
+                                 selectedTransaction.telematicsAssessment?.classification === 'LIKELY' ? 'Likely supported' : 'Needs review'}
+                              </span>
+                            </div>
+
+                            <div className="text-2xs text-slate-550 leading-normal">
+                              <strong>Reason:</strong> {
+                                selectedTransaction.telematicsOverrideStatus ? `Auditor override: ${selectedTransaction.reviewerNote || 'None'}` :
+                                selectedTransaction.telematicsAssessment?.classification === 'VERIFIED' ? 'GPS confirmation matching transaction time and location.' :
+                                selectedTransaction.telematicsAssessment?.classification === 'LIKELY' ? 'Close match found within the window.' :
+                                'GPS does not confirm this transaction yet.'
+                              }
+                            </div>
+
+                            <div className="space-y-1 pt-1.5 border-t border-slate-200 dark:border-slate-800">
+                              <label className="text-[10px] font-bold text-slate-450 uppercase tracking-wider block">Auditor notes (Required for override)</label>
+                              <textarea
+                                value={manualReviewNote}
+                                placeholder="Type auditor notes / reason for override here..."
+                                onChange={(e) => {
+                                  setManualReviewNote(e.target.value);
+                                  setSelectedTransaction({ ...selectedTransaction, reviewerNote: e.target.value });
+                                }}
+                                className="w-full text-2xs p-2 bg-white dark:bg-slate-900 border border-slate-250 dark:border-slate-800 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                                rows={2}
+                              />
+                            </div>
+
+                            <div className="flex gap-2 pt-1">
+                              <button
+                                onClick={() => handleRowOverride(selectedTransaction.id, 'Marked Supported', manualReviewNote)}
+                                disabled={!manualReviewNote.trim()}
+                                className="flex-1 py-1.5 bg-green-600 hover:bg-green-505 disabled:opacity-45 disabled:cursor-not-allowed text-white rounded-xl text-3xs font-extrabold transition shadow-sm"
+                              >
+                                Mark supported
+                              </button>
+                              <button
+                                onClick={() => handleRowOverride(selectedTransaction.id, 'Flagged Mismatch', manualReviewNote)}
+                                disabled={!manualReviewNote.trim()}
+                                className="flex-1 py-1.5 bg-rose-600 hover:bg-rose-505 disabled:opacity-45 disabled:cursor-not-allowed text-white rounded-xl text-3xs font-extrabold transition shadow-sm"
+                              >
+                                Flag issue
+                              </button>
+                              <button
+                                onClick={() => handleRowOverride(selectedTransaction.id, 'Needs Follow Up', manualReviewNote)}
+                                disabled={!manualReviewNote.trim()}
+                                className="flex-1 py-1.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-45 disabled:cursor-not-allowed text-white rounded-xl text-3xs font-extrabold transition"
+                              >
+                                Follow up
+                              </button>
+                            </div>
                           </div>
                         </div>
                       )}
 
-                      {/* Map update block for clicked result */}
-                      {selectedGpsRow && manualGeocodedCoords && (
-                        <div className="bg-slate-50 dark:bg-slate-850/50 border border-slate-200 dark:border-slate-800 rounded-2xl p-3.5 space-y-2.5 shadow-sm animate-fade-in">
-                          <div className="flex justify-between items-center">
-                            <span className="text-[10px] uppercase font-bold text-slate-450">Selected Point Detail</span>
-                            <span className={`px-2 py-0.5 rounded text-[9px] font-bold ${
-                              manualGeocodedCoords.type === 'exact' ? 'bg-green-100 text-green-800 dark:bg-green-950/20' :
-                              manualGeocodedCoords.type === 'approximate' ? 'bg-amber-100 text-amber-800 dark:bg-amber-955/20' : 'bg-slate-100 text-slate-700 dark:text-slate-350'
-                            }`}>
-                              {manualGeocodedCoords.type === 'exact' ? 'Exact Coordinate' :
-                               manualGeocodedCoords.type === 'approximate' ? 'Approximate GPS location from text' : 'Text location only'}
-                            </span>
+                      {/* Tab 2: manual_review */}
+                      {rightPanelTab === 'manual_review' && (
+                        <div className="space-y-4 text-xs animate-fade-in">
+                          <div className="bg-slate-50 dark:bg-slate-855 border border-slate-205 dark:border-slate-800 rounded-2xl p-3.5 space-y-3 shadow-sm">
+                            <div className="grid grid-cols-2 md:grid-cols-3 gap-2.5">
+                              <div>
+                                <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider mb-1">Vehicle</label>
+                                <select
+                                  value={manualVehicle}
+                                  onChange={(e) => setManualVehicle(e.target.value)}
+                                  className="w-full text-xs p-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl focus:outline-none"
+                                >
+                                  <option value="">Select Vehicle</option>
+                                  {activeBatch.vehicles.map(v => (
+                                    <option key={v} value={v}>{v}</option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider mb-1">Date</label>
+                                <input
+                                  type="date"
+                                  value={manualDate}
+                                  onChange={(e) => setManualDate(e.target.value)}
+                                  className="w-full text-xs p-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl focus:outline-none"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider mb-1">Time</label>
+                                <input
+                                  type="time"
+                                  value={manualTime}
+                                  onChange={(e) => setManualTime(e.target.value)}
+                                  className="w-full text-xs p-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl focus:outline-none"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider mb-1">Window</label>
+                                <select
+                                  value={manualWindow}
+                                  onChange={(e) => setManualWindow(e.target.value)}
+                                  className="w-full text-xs p-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl focus:outline-none"
+                                >
+                                  <option value="15">±15 minutes</option>
+                                  <option value="30">±30 minutes</option>
+                                  <option value="60">±60 minutes</option>
+                                  <option value="120">±2 hours</option>
+                                  <option value="day">Full day</option>
+                                </select>
+                              </div>
+                              <div className="col-span-2">
+                                <label className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider mb-1">Location contains</label>
+                                <input
+                                  type="text"
+                                  placeholder="City, street, or country..."
+                                  value={manualLocationSearch}
+                                  onChange={(e) => setManualLocationSearch(e.target.value)}
+                                  className="w-full text-xs p-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl focus:outline-none"
+                                />
+                              </div>
+                            </div>
+
+                            <button
+                              onClick={handleManualSearch}
+                              className="w-full py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-bold flex items-center justify-center gap-1.5 shadow-sm transition"
+                            >
+                              <Search className="w-4 h-4" /> Search GPS History
+                            </button>
                           </div>
 
-                          {manualGeocodedCoords.lat && manualGeocodedCoords.lon ? (
-                            <div className="space-y-1">
-                              <iframe
-                                width="100%"
-                                height="150"
-                                frameBorder="0"
-                                scrolling="no"
-                                marginHeight={0}
-                                marginWidth={0}
-                                src={`https://www.openstreetmap.org/export/embed.html?bbox=${manualGeocodedCoords.lon - 0.01}%2C${manualGeocodedCoords.lat - 0.005}%2C${manualGeocodedCoords.lon + 0.01}%2C${manualGeocodedCoords.lat + 0.005}&layer=mapnik&marker=${manualGeocodedCoords.lat}%2C${manualGeocodedCoords.lon}`}
-                                className="rounded-xl border border-slate-200 dark:border-slate-800"
-                              ></iframe>
-                              {manualGeocodedCoords.type === 'approximate' && (
-                                <p className="text-[9px] text-amber-600 dark:text-amber-400 font-sans leading-normal">
-                                  ⚠️ This marker is approximate and was created from GPS location text, not exact GPS coordinates.
-                                </p>
-                              )}
-                            </div>
-                          ) : (
-                            <div className="p-3 bg-slate-100 dark:bg-slate-900 border rounded-xl text-center text-3xs text-slate-400 font-sans">
-                              {manualGeocodedCoords.type === 'text_only' ? 'Location text only — map marker unavailable' : 'Map unavailable'}
+                          {manualResults.length > 0 && (
+                            <div className="space-y-1.5">
+                              <span className="font-bold text-[10px] text-slate-450 uppercase tracking-wider block">GPS History Search Results ({manualResults.length})</span>
+                              <div className="border border-slate-150 dark:border-slate-800 rounded-xl overflow-hidden max-h-40 overflow-y-auto">
+                                <table className="w-full text-left border-collapse text-3xs">
+                                  <thead>
+                                    <tr className="bg-slate-50 dark:bg-slate-850 text-slate-505 font-semibold border-b border-slate-150">
+                                      <th className="p-1.5">Time</th>
+                                      <th className="p-1.5">Difference</th>
+                                      <th className="p-1.5">Location</th>
+                                      <th className="p-1.5 text-right">Fuel</th>
+                                      <th className="p-1.5 text-right">KM</th>
+                                      <th className="p-1.5">Status</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-slate-100 dark:divide-slate-850 font-mono">
+                                    {manualResults.map((pt: any) => {
+                                      const ptTime = new Date(pt.timestamp).getTime();
+                                      const txTime = new Date(selectedTransaction.transactionTimestamp || selectedTransaction.transactionDateTime).getTime();
+                                      const diffMins = Math.round((ptTime - txTime) / 60000);
+                                      const diffText = diffMins === 0 ? 'exact match' : diffMins < 0 ? `${Math.abs(diffMins)}m before` : `${diffMins}m after`;
+                                      const isSelected = selectedGpsRow?.id === pt.id;
+                                      
+                                      return (
+                                        <tr
+                                          key={pt.id}
+                                          onClick={() => setSelectedGpsRow(pt)}
+                                          className={`hover:bg-slate-50/50 dark:hover:bg-slate-800/30 cursor-pointer ${
+                                            isSelected ? 'bg-purple-50/30 dark:bg-purple-950/20 font-bold border-l-2 border-l-purple-500' : ''
+                                          }`}
+                                        >
+                                          <td className="p-1.5 whitespace-nowrap">{new Date(pt.timestamp).toLocaleTimeString()}</td>
+                                          <td className="p-1.5 whitespace-nowrap font-sans">{diffText}</td>
+                                          <td className="p-1.5 truncate max-w-[140px]" title={buildCombinedLocationText(pt)}>{buildCombinedLocationText(pt)}</td>
+                                          <td className="p-1.5 text-right">{pt.fuelLevelPercent !== null ? `${Math.round(pt.fuelLevelPercent)}%` : '—'}</td>
+                                          <td className="p-1.5 text-right">{pt.odometerKm ?? '—'}</td>
+                                          <td className="p-1.5 whitespace-nowrap font-sans">{pt.activity || (pt.speedKmh > 0 ? 'driving' : 'stopped')}</td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
                             </div>
                           )}
 
-                          <div className="text-3xs font-mono grid grid-cols-2 gap-1.5 bg-white dark:bg-slate-900 border rounded-xl p-2">
-                            <div><span className="text-slate-400 font-sans">Time:</span> {new Date(selectedGpsRow.timestamp).toLocaleTimeString()}</div>
-                            <div><span className="text-slate-400 font-sans">Odometer:</span> {selectedGpsRow.odometerKm ?? '—'} km</div>
-                            <div><span className="text-slate-400 font-sans">Fuel:</span> {selectedGpsRow.fuelLevelPercent !== null ? `${Math.round(selectedGpsRow.fuelLevelPercent)}%` : '—'}</div>
-                            <div><span className="text-slate-400 font-sans">Status:</span> {selectedGpsRow.activity || 'Standstill'}</div>
-                            <div className="col-span-2 truncate"><span className="text-slate-400 font-sans">Text:</span> {manualGeocodedCoords.combinedText || '—'}</div>
+                          {selectedGpsRow && manualGeocodedCoords && (
+                            <div className="bg-slate-50 dark:bg-slate-855 border border-slate-200 dark:border-slate-800 rounded-2xl p-3.5 space-y-2.5 shadow-sm animate-fade-in">
+                              <div className="flex justify-between items-center">
+                                <span className="text-[10px] uppercase font-bold text-slate-450">Selected Point Detail</span>
+                                <span className={`px-2 py-0.5 rounded text-[9px] font-bold ${
+                                  manualGeocodedCoords.type === 'exact' ? 'bg-green-100 text-green-800 dark:bg-green-950/20' :
+                                  manualGeocodedCoords.type === 'approximate' ? 'bg-amber-100 text-amber-800 dark:bg-amber-955/20' : 'bg-slate-100 text-slate-700 dark:text-slate-355'
+                                }`}>
+                                  {manualGeocodedCoords.type === 'exact' ? 'Exact Coordinate' :
+                                   manualGeocodedCoords.type === 'approximate' ? 'Approximate GPS location from text' : 'Text location only'}
+                                </span>
+                              </div>
+
+                              {manualGeocodedCoords.lat && manualGeocodedCoords.lon ? (
+                                <div className="space-y-1">
+                                  <iframe
+                                    width="100%"
+                                    height="150"
+                                    frameBorder="0"
+                                    scrolling="no"
+                                    marginHeight={0}
+                                    marginWidth={0}
+                                    src={`https://www.openstreetmap.org/export/embed.html?bbox=${manualGeocodedCoords.lon - 0.01}%2C${manualGeocodedCoords.lat - 0.005}%2C${manualGeocodedCoords.lon + 0.01}%2C${manualGeocodedCoords.lat + 0.005}&layer=mapnik&marker=${manualGeocodedCoords.lat}%2C${manualGeocodedCoords.lon}`}
+                                    className="rounded-xl border border-slate-200 dark:border-slate-805"
+                                  ></iframe>
+                                  {manualGeocodedCoords.type === 'approximate' && (
+                                    <p className="text-[9px] text-amber-600 dark:text-amber-400 font-sans leading-normal">
+                                      ⚠️ This is approximate. The GPS file did not provide exact coordinates.
+                                    </p>
+                                  )}
+                                </div>
+                              ) : (
+                                <div className="p-3 bg-slate-100 dark:bg-slate-900 border rounded-xl text-center text-3xs text-slate-400 font-sans">
+                                  {manualGeocodedCoords.type === 'text_only' ? 'Location text only — map marker unavailable' : 'Map unavailable'}
+                                </div>
+                              )}
+
+                              <div className="text-3xs font-mono grid grid-cols-2 gap-1.5 bg-white dark:bg-slate-900 border rounded-xl p-2">
+                                <div><span className="text-slate-400 font-sans">Time:</span> {new Date(selectedGpsRow.timestamp).toLocaleTimeString()}</div>
+                                <div><span className="text-slate-400 font-sans">Odometer:</span> {selectedGpsRow.odometerKm ?? '—'} km</div>
+                                <div><span className="text-slate-400 font-sans">Fuel:</span> {selectedGpsRow.fuelLevelPercent !== null ? `${Math.round(selectedGpsRow.fuelLevelPercent)}%` : '—'}</div>
+                                <div><span className="text-slate-400 font-sans">Status:</span> {selectedGpsRow.activity || 'Standstill'}</div>
+                                <div className="col-span-2 truncate"><span className="text-slate-400 font-sans">Text:</span> {manualGeocodedCoords.combinedText || '—'}</div>
+                              </div>
+                            </div>
+                          )}
+
+                          <div className="space-y-2 border-t border-slate-150 dark:border-slate-800 pt-3 mt-1">
+                            <label className="font-extrabold text-[10px] text-slate-500 uppercase tracking-wider block">
+                              Manual Review Note (Required for Override)
+                            </label>
+                            {!manualReviewNote.trim() && (
+                              <div className="text-[10px] text-rose-500 font-semibold mb-1">
+                                ⚠️ Reviewer note is required before manually supporting or overriding.
+                              </div>
+                            )}
+                            <textarea
+                              value={manualReviewNote}
+                              placeholder="Provide manual review explanation, reason for override, or verification notes..."
+                              onChange={(e) => {
+                                setManualReviewNote(e.target.value);
+                                setSelectedTransaction({ ...selectedTransaction, reviewerNote: e.target.value });
+                              }}
+                              className="w-full text-2xs p-2 bg-slate-50 dark:bg-slate-855 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-1 focus:ring-purple-500 font-sans"
+                              rows={2}
+                            />
+
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => handleSaveManualReview('supports', false)}
+                                disabled={!manualReviewNote.trim()}
+                                className="flex-grow py-1.5 bg-green-600 hover:bg-green-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl text-2xs font-bold transition shadow-sm"
+                              >
+                                Use as supporting evidence
+                              </button>
+                            </div>
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => handleSaveManualReview('does_not_support', false)}
+                                disabled={!manualReviewNote.trim()}
+                                className="flex-1 py-1 bg-rose-600 hover:bg-rose-505 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl text-3xs font-bold transition"
+                              >
+                                Flag as mismatch
+                              </button>
+                              <button
+                                onClick={() => handleSaveManualReview('needs_follow_up', false)}
+                                disabled={!manualReviewNote.trim()}
+                                className="flex-1 py-1 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl text-3xs font-bold transition"
+                              >
+                                Needs follow-up
+                              </button>
+                            </div>
                           </div>
                         </div>
                       )}
 
-                      {/* Manual Review Note & Decision Buttons */}
-                      <div className="space-y-2 border-t border-slate-150 dark:border-slate-800 pt-3 mt-1">
-                        <label className="font-extrabold text-[10px] text-slate-500 uppercase tracking-wider block">
-                          Manual Review Note (Required for Override)
-                        </label>
-                        {!manualReviewNote.trim() && (
-                          <div className="text-[10px] text-rose-500 font-semibold mb-1">
-                            ⚠️ Reviewer note is required before manually supporting or overriding.
-                          </div>
-                        )}
-                        <textarea
-                          value={manualReviewNote}
-                          placeholder="Provide manual review explanation, reason for override, or verification notes..."
-                          onChange={(e) => setManualReviewNote(e.target.value)}
-                          className="w-full text-2xs p-2 bg-slate-50 dark:bg-slate-855 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-1 focus:ring-purple-500 font-sans"
-                          rows={2}
-                        />
-
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => handleSaveManualReview('supports', false)}
-                            disabled={!manualReviewNote.trim()}
-                            className="flex-1 py-1.5 bg-green-600 hover:bg-green-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl text-2xs font-bold transition shadow-sm"
+                      {/* Tab 3: gps_upload */}
+                      {rightPanelTab === 'gps_upload' && (
+                        <div className="space-y-4 animate-fade-in text-xs">
+                          <div
+                            {...getGpsProps()}
+                            className={`border-2 border-dashed rounded-2xl flex flex-col items-center justify-center py-10 text-center cursor-pointer transition-all ${
+                              gpsDrag
+                                ? 'border-indigo-500 bg-indigo-50/10'
+                                : 'border-slate-250 dark:border-slate-800 hover:border-indigo-400 hover:bg-slate-50/20'
+                            }`}
                           >
-                            Use Selected Row
-                          </button>
-                          <button
-                            onClick={() => handleSaveManualReview('supports', true)}
-                            disabled={!manualReviewNote.trim() || manualResults.length === 0}
-                            className="flex-1 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl text-2xs font-bold transition shadow-sm"
-                          >
-                            Use Window
-                          </button>
-                        </div>
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => handleSaveManualReview('does_not_support', false)}
-                            disabled={!manualReviewNote.trim()}
-                            className="flex-1 py-1 bg-rose-600 hover:bg-rose-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl text-3xs font-bold transition"
-                          >
-                            Flag Mismatch
-                          </button>
-                          <button
-                            onClick={() => handleSaveManualReview('needs_follow_up', false)}
-                            disabled={!manualReviewNote.trim()}
-                            className="flex-1 py-1 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl text-3xs font-bold transition"
-                          >
-                            Needs Follow-up
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    // ─── STANDARD COMPARE VIEW ───
-                    <div className="space-y-4 text-xs animate-fade-in">
-                      
-                      {/* Was the vehicle there at that time? */}
-                      {(() => {
-                        const hasPoints = selectedTxEvidence?.pointsInWindow?.length > 0 || selectedTxEvidence?.beforePoint || selectedTxEvidence?.afterPoint;
-                        
-                        let likelihoodTitle = 'Needs review';
-                        let likelihoodDesc = 'No GPS point was found within ±30 minutes of the invoice time.';
-                        let statusColor = 'bg-amber-50 border-amber-200 text-amber-800 dark:bg-amber-955/20 dark:border-amber-900/50 dark:text-amber-400';
-
-                        if (selectedTransaction.manualGpsReview?.decision === 'supports') {
-                          likelihoodTitle = 'Manually Supported';
-                          likelihoodDesc = `Supported by auditor: ${selectedTransaction.manualGpsReview.note}`;
-                          statusColor = 'bg-indigo-50 border-indigo-200 text-indigo-800 dark:bg-indigo-950/20 dark:border-indigo-900/50 dark:text-indigo-400';
-                        } else if (selectedTransaction.telematicsAssessment?.classification === 'VERIFIED') {
-                          likelihoodTitle = 'Likely supported';
-                          const nearestPtTime = selectedTxEvidence?.pointsInWindow?.[0]?.timestamp;
-                          const diffMin = nearestPtTime ? Math.round(Math.abs(new Date(nearestPtTime).getTime() - new Date(selectedTransaction.transactionTimestamp || selectedTransaction.transactionDateTime).getTime()) / 60000) : 4;
-                          likelihoodDesc = `Vehicle was near forecourt ${diffMin} minutes before the invoice time. Fuel increased within the review window.`;
-                          statusColor = 'bg-green-50 border-green-200 text-green-800 dark:bg-green-950/15 dark:border-green-900/50 dark:text-green-400';
-                        } else if (geocodedCoords?.type === 'approximate') {
-                          likelihoodTitle = 'Approximate GPS location';
-                          likelihoodDesc = 'GPS file has no coordinates, so the map marker is estimated from the location text. Confirm manually before approval.';
-                          statusColor = 'bg-amber-50 border-amber-200 text-amber-800 dark:bg-amber-955/20 dark:border-amber-900/50 dark:text-amber-400';
-                        } else if (geocodedCoords?.type === 'text_only') {
-                          likelihoodTitle = 'Location text only — map marker unavailable';
-                          likelihoodDesc = 'The GPS file contains location text but no latitude/longitude and could not be mapped. Use the GPS rows below to review manually.';
-                          statusColor = 'bg-slate-50 border-slate-205 text-slate-800 dark:bg-slate-900/40 dark:border-slate-800 dark:text-slate-355';
-                        } else if (!hasPoints) {
-                          likelihoodTitle = 'Map unavailable';
-                          likelihoodDesc = 'The GPS file contains location text but no latitude/longitude and could not be mapped. Use the GPS rows below to review manually.';
-                          statusColor = 'bg-slate-50 border-slate-205 text-slate-805 dark:bg-slate-900/40 dark:border-slate-800 dark:text-slate-355';
-                        }
-
-                        return (
-                          <div className={`p-3 border rounded-2xl text-2xs space-y-1.5 leading-normal ${statusColor}`}>
-                            <div className="flex justify-between items-center">
-                              <span className="font-extrabold text-xs block">{likelihoodTitle}</span>
-                              <span className="text-[9px] uppercase font-bold tracking-wider opacity-75">GPS Assessment</span>
-                            </div>
-                            <p className="text-[11px] leading-relaxed font-medium">{likelihoodDesc}</p>
-                          </div>
-                        );
-                      })()}
-
-                      {/* Map Box */}
-                      {geocodedCoords && geocodedCoords.lat && geocodedCoords.lon ? (
-                        <div className="space-y-1 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-2 shadow-sm">
-                          <div className="flex justify-between items-center text-[10px] text-slate-450 px-1 pb-1">
-                            <span className="font-bold uppercase tracking-wider flex items-center gap-1">
-                              <MapPin className="w-3.5 h-3.5 text-indigo-500" />
-                              {geocodedCoords.type === 'exact' ? 'Exact GPS coordinates available' : 'Approximate GPS location from text'}
-                            </span>
-                            {geocodedCoords.type === 'approximate' && (
-                              <span
-                                className="cursor-help font-extrabold text-amber-500 flex items-center gap-0.5"
-                                title="This marker is approximate and was created from GPS location text, not exact GPS coordinates."
-                              >
-                                Approximate ⓘ
-                              </span>
-                            )}
-                          </div>
-                          <iframe
-                            width="105%"
-                            height="180"
-                            frameBorder="0"
-                            scrolling="no"
-                            marginHeight={0}
-                            marginWidth={0}
-                            src={`https://www.openstreetmap.org/export/embed.html?bbox=${geocodedCoords.lon - 0.01}%2C${geocodedCoords.lat - 0.005}%2C${geocodedCoords.lon + 0.01}%2C${geocodedCoords.lat + 0.005}&layer=mapnik&marker=${geocodedCoords.lat}%2C${geocodedCoords.lon}`}
-                            className="rounded-xl border border-slate-150 dark:border-slate-800"
-                          ></iframe>
-                        </div>
-                      ) : (
-                        <div className="bg-slate-50 dark:bg-slate-855 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 text-center text-3xs text-slate-500 space-y-2">
-                          <MapPin className="w-8 h-8 text-slate-350 mx-auto" />
-                          <div>
-                            <span className="font-extrabold text-slate-700 dark:text-slate-300 block">
-                              {geocodedCoords?.type === 'text_only' ? 'Location text only — map marker unavailable' : 'Map unavailable'}
-                            </span>
-                            <p className="text-[10px] text-slate-450 mt-1 max-w-xs mx-auto">
-                              The GPS log contains location labels but no exact coordinates. Use the manual list below to review details.
+                            <input {...getGpsInput()} />
+                            <Satellite className="h-8 w-8 text-slate-400 mb-2 animate-pulse" />
+                            <p className="text-sm font-extrabold text-slate-900 dark:text-white">
+                              Upload GPS file(s)
+                            </p>
+                            <p className="text-2xs text-slate-500 mt-0.5">
+                              One file or multiple vehicle files accepted
                             </p>
                           </div>
-                        </div>
-                      )}
 
-                      {/* Key GPS Values table */}
-                      {(() => {
-                        const pts = selectedTxEvidence?.pointsInWindow || [];
-                        const txTime = new Date(selectedTransaction.transactionTimestamp || selectedTransaction.transactionDateTime).getTime();
-                        let nearest = null;
-                        let minDiff = Infinity;
-                        for (const pt of pts) {
-                          const diff = Math.abs(new Date(pt.timestamp).getTime() - txTime);
-                          if (diff < minDiff) {
-                            minDiff = diff;
-                            nearest = pt;
-                          }
-                        }
-                        if (!nearest) nearest = selectedTxEvidence?.beforePoint || selectedTxEvidence?.afterPoint;
-                        
-                        if (!nearest) return null;
-
-                        const diffMins = Math.round(Math.abs(new Date(nearest.timestamp).getTime() - txTime) / 60000);
-                        const isBefore = new Date(nearest.timestamp).getTime() < txTime;
-                        const diffText = `${diffMins} minutes ${isBefore ? 'before' : 'after'}`;
-
-                        return (
-                          <div className="bg-slate-50 dark:bg-slate-855/50 border border-slate-150 dark:border-slate-800 rounded-xl p-3.5 space-y-2 text-2xs font-sans">
-                            <span className="font-extrabold text-[10px] text-slate-450 uppercase tracking-wider block">Key GPS values</span>
-                            <div className="grid grid-cols-2 gap-y-2 gap-x-4">
-                              <div>
-                                <span className="text-slate-400 block text-[9px] uppercase font-semibold">Invoice time</span>
-                                <span className="font-mono font-bold text-slate-705 dark:text-slate-300">
-                                  {new Date(selectedTransaction.transactionTimestamp || selectedTransaction.transactionDateTime).toISOString().replace('T', ' ').slice(0, 16)}
-                                </span>
-                              </div>
-                              <div>
-                                <span className="text-slate-400 block text-[9px] uppercase font-semibold">GPS nearest</span>
-                                <span className="font-mono font-bold text-slate-705 dark:text-slate-300">
-                                  {new Date(nearest.timestamp).toISOString().replace('T', ' ').slice(0, 16)}
-                                </span>
-                              </div>
-                              <div>
-                                <span className="text-slate-400 block text-[9px] uppercase font-semibold">Difference</span>
-                                <span className="font-bold text-slate-705 dark:text-slate-305">{diffText}</span>
-                              </div>
-                              <div>
-                                <span className="text-slate-400 block text-[9px] uppercase font-semibold">Vehicle status</span>
-                                <span className="font-bold text-slate-705 dark:text-slate-305">{nearest.activity || (nearest.speedKmh > 0 ? 'moving' : 'stopped')}</span>
-                              </div>
-                              <div>
-                                <span className="text-slate-400 block text-[9px] uppercase font-semibold">Fuel level</span>
-                                <span className="font-mono font-extrabold text-emerald-600">{nearest.fuelLevelPercent !== null ? `${Math.round(nearest.fuelLevelPercent)}%` : '—'}</span>
-                              </div>
-                              <div>
-                                <span className="text-slate-400 block text-[9px] uppercase font-semibold">KM</span>
-                                <span className="font-mono font-extrabold text-slate-750 dark:text-slate-300">{nearest.odometerKm ?? '—'} km</span>
-                              </div>
-                              <div className="col-span-2 border-t border-slate-100 dark:border-slate-800 pt-1.5 mt-1">
-                                <span className="text-slate-400 block text-[9px] uppercase font-semibold">Location</span>
-                                <span className="font-bold text-slate-800 dark:text-slate-200 leading-normal block truncate" title={buildCombinedLocationText(nearest)}>
-                                  {buildCombinedLocationText(nearest) || '—'}
-                                </span>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })()}
-
-                      {/* GPS window control & settings cogs */}
-                      <div className="bg-slate-50 dark:bg-slate-850 border border-slate-150 dark:border-slate-800 rounded-xl p-3 space-y-2 text-2xs">
-                        <div className="flex items-center justify-between">
-                          <span className="font-bold text-slate-700 dark:text-slate-300">GPS Time Window:</span>
-                          <select
-                            value={timeWindowMinutes}
-                            onChange={(e) => setTimeWindowMinutes(Number(e.target.value))}
-                            className="bg-white dark:bg-slate-900 border border-slate-205 dark:border-slate-700 rounded-lg px-2.5 py-1 text-2xs"
-                          >
-                            <option value={15}>±15 minutes</option>
-                            <option value={30}>±30 minutes (Default)</option>
-                            <option value={60}>±60 minutes</option>
-                            <option value={120}>±2 hours</option>
-                          </select>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span className="font-bold text-slate-700 dark:text-slate-300">Approximate Map text mapping:</span>
-                          <select
-                            value={approximateMapSettings}
-                            onChange={(e: any) => setApproximateMapSettings(e.target.value)}
-                            className="bg-white dark:bg-slate-900 border border-slate-205 dark:border-slate-700 rounded-lg px-2.5 py-1 text-2xs"
-                          >
-                            <option value="on">On for selected transaction only</option>
-                            <option value="off">Off</option>
-                          </select>
-                        </div>
-                        {advancedMode && (
-                          <div className="flex items-center justify-between">
-                            <span className="font-bold text-slate-700 dark:text-slate-300">Bulk geocode GPS history:</span>
-                            <select
-                              value={bulkGeocodeSettings}
-                              onChange={(e: any) => setBulkGeocodeSettings(e.target.value)}
-                              className="bg-white dark:bg-slate-900 border border-slate-205 dark:border-slate-700 rounded-lg px-2.5 py-1 text-2xs"
-                            >
-                              <option value="off">Off (Default)</option>
-                              <option value="on">On</option>
-                            </select>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Small GPS rows timeline table */}
-                      <div className="space-y-1.5 animate-fade-in">
-                        <span className="font-bold text-[10px] text-slate-450 uppercase tracking-wider block">GPS log timeline</span>
-                        <div className="border border-slate-150 dark:border-slate-800 rounded-xl overflow-hidden max-h-36 overflow-y-auto">
-                          <table className="w-full text-left border-collapse text-3xs">
-                            <thead>
-                              <tr className="bg-slate-50 dark:bg-slate-850 text-slate-500 font-semibold border-b border-slate-150">
-                                <th className="p-1.5">Relation</th>
-                                <th className="p-1.5">Time</th>
-                                <th className="p-1.5">Difference</th>
-                                <th className="p-1.5">Location</th>
-                                <th className="p-1.5 text-right">Fuel</th>
-                                <th className="p-1.5 text-right">KM</th>
-                                <th className="p-1.5">Status</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-slate-100 dark:divide-slate-850 font-mono">
-                              {!selectedTxEvidence || selectedTxEvidence.pointsInWindow?.length === 0 ? (
-                                <tr>
-                                  <td colSpan={7} className="p-3 text-center text-slate-400 font-sans">No logs in window.</td>
-                                </tr>
-                              ) : (
-                                selectedTxEvidence?.pointsInWindow?.map((pt: any, i: number) => {
-                                  const ptTime = new Date(pt.timestamp).getTime();
-                                  const txTime = new Date(selectedTransaction.transactionTimestamp || selectedTransaction.transactionDateTime).getTime();
-                                  const diffMins = Math.round((ptTime - txTime) / 60000);
-                                  const diffText = diffMins === 0 ? '0 mins' : diffMins < 0 ? `${Math.abs(diffMins)} mins before` : `${diffMins} mins after`;
-                                  const relation = i === 0 ? 'Nearest' : ptTime < txTime ? 'Before' : 'After';
-                                  
-                                  return (
-                                    <tr key={i} className="hover:bg-slate-50/50">
-                                      <td className="p-1.5 font-sans font-semibold text-slate-550">{relation}</td>
-                                      <td className="p-1.5 whitespace-nowrap">{new Date(pt.timestamp).toLocaleTimeString()}</td>
-                                      <td className="p-1.5 whitespace-nowrap font-sans">{diffText}</td>
-                                      <td className="p-1.5 truncate max-w-[120px]" title={buildCombinedLocationText(pt)}>{buildCombinedLocationText(pt)}</td>
-                                      <td className="p-1.5 text-right">{pt.fuelLevelPercent !== null ? `${Math.round(pt.fuelLevelPercent)}%` : '—'}</td>
-                                      <td className="p-1.5 text-right">{pt.odometerKm ?? '—'}</td>
-                                      <td className="p-1.5 font-sans">{pt.activity || (pt.speedKmh > 0 ? 'driving' : 'stopped')}</td>
-                                    </tr>
-                                  );
-                                })
-                              )}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-
-                      {/* Automatic vs Manual review status side-by-side */}
-                      <div className="bg-slate-50 dark:bg-slate-850 p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 text-2xs space-y-2">
-                        <div className="flex justify-between items-center">
-                          <span className="text-slate-400 font-sans font-semibold">Automatic result:</span>
-                          <span className="font-bold text-slate-800 dark:text-slate-250">
-                            {selectedTransaction.telematicsAssessment?.classification === 'VERIFIED' ? 'Supported' : 'No confirmed match'}
-                          </span>
-                        </div>
-                        {selectedTransaction.telematicsOverrideStatus && (
-                          <div className="flex flex-col gap-0.5 border-t border-slate-200 dark:border-slate-800 pt-2 mt-1.5 animate-fade-in">
-                            <div className="flex justify-between items-center">
-                              <span className="text-slate-400 font-sans font-semibold">Manual review:</span>
-                              <span className="font-extrabold text-indigo-650 dark:text-indigo-400">
-                                {selectedTransaction.telematicsOverrideStatus}
+                          {activeBatch.attachedGpsFiles && activeBatch.attachedGpsFiles.length > 0 && (
+                            <div className="space-y-2">
+                              <span className="text-xs font-bold text-slate-705 dark:text-slate-350">
+                                Linked GPS Telemetry logs
                               </span>
+                              <div className="space-y-2 max-h-56 overflow-y-auto">
+                                {activeBatch.attachedGpsFiles.map((file, i) => (
+                                  <div key={i} className="p-3 bg-slate-50/50 border border-slate-150 dark:border-slate-800 rounded-xl text-2xs space-y-1 relative">
+                                    <div className="flex justify-between font-bold text-slate-900 dark:text-white">
+                                      <span className="truncate max-w-[200px]" title={file.fileName}>{file.fileName}</span>
+                                      <span className="font-mono text-indigo-650 dark:text-indigo-400">{file.vehicleRegistration}</span>
+                                    </div>
+                                    <div className="text-[10px] text-slate-450 font-mono space-y-0.5">
+                                      <div>Coverage: {file.coverageStart ? new Date(file.coverageStart).toLocaleDateString() : '—'} to {file.coverageEnd ? new Date(file.coverageEnd).toLocaleDateString() : '—'}</div>
+                                      {file.gpsRecordCount && <div>Records: {file.gpsRecordCount} points</div>}
+                                    </div>
+                                    <button
+                                      onClick={async () => {
+                                        if (!confirm('Detach this GPS file?')) return;
+                                        const nextFiles = activeBatch.attachedGpsFiles?.filter((_, idx) => idx !== i);
+                                        const vehicleStatuses = { ...(activeBatch.vehicleStatuses || {}) };
+                                        delete vehicleStatuses[file.vehicleRegistration];
+                                        const checkResults = { ...(activeBatch.checkResults || {}) };
+                                        delete checkResults[file.vehicleRegistration];
+                                        
+                                        await fetch(`/api/batches/${activeBatch.id}`, {
+                                          method: 'PATCH',
+                                          headers: { 'Content-Type': 'application/json' },
+                                          body: JSON.stringify({
+                                            attachedGpsFiles: nextFiles,
+                                            vehicleStatuses,
+                                            vehicleCheckStatuses: vehicleStatuses,
+                                            checkResults,
+                                            verificationResults: checkResults,
+                                          })
+                                        });
+                                        fetchBatchDetails(activeBatch.id);
+                                      }}
+                                      className="absolute right-2.5 top-2.5 p-1 text-slate-400 hover:text-red-500 rounded"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                ))}
+                              </div>
                             </div>
-                            {selectedTransaction.reviewerNote && (
-                              <p className="text-[10px] text-slate-500 italic mt-0.5 leading-normal">
-                                &quot;{selectedTransaction.reviewerNote}&quot;
-                              </p>
-                            )}
-                          </div>
-                        )}
-                        <button
-                          onClick={() => setShowManualGpsReview(true)}
-                          className="w-full py-1.5 bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/20 dark:hover:bg-purple-950/45 border border-purple-200 text-purple-750 dark:text-purple-400 rounded-xl text-3xs font-extrabold transition uppercase block"
-                        >
-                          Manual GPS Review Mode
-                        </button>
-                      </div>
-
-                      {/* Auditor overrides notes & actions */}
-                      {advancedMode && (
-                        <div className="space-y-2 border-t border-slate-150 dark:border-slate-805 pt-3">
-                          <span className="font-bold text-[10px] text-slate-500 uppercase tracking-wider block">Auditor Override Decisions (Advanced Mode)</span>
-                          <textarea
-                            value={selectedTransaction.reviewerNote || ''}
-                            placeholder="Provide audit override reason or mapping notes..."
-                            onChange={(e) => {
-                              const note = e.target.value;
-                              setSelectedTransaction({ ...selectedTransaction, reviewerNote: note });
-                            }}
-                            onBlur={(e) => {
-                              handleRowOverride(selectedTransaction.id, selectedTransaction.telematicsOverrideStatus || 'Review', e.target.value);
-                            }}
-                            className="w-full text-2xs p-2 bg-slate-50 dark:bg-slate-855 border border-slate-200 dark:border-slate-700 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 font-sans"
-                            rows={2}
-                          />
-                          <div className="flex gap-1.5 flex-wrap">
-                            <button
-                              onClick={() => handleRowOverride(selectedTransaction.id, 'Marked Supported', selectedTransaction.reviewerNote || 'Verified override')}
-                              className="py-1 px-2.5 bg-green-600 hover:bg-green-500 text-white rounded-lg text-3xs font-semibold"
-                            >
-                              Mark Supported
-                            </button>
-                            <button
-                              onClick={() => handleRowOverride(selectedTransaction.id, 'Flagged Mismatch', selectedTransaction.reviewerNote || 'Flagged issue')}
-                              className="py-1 px-2.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-3xs font-semibold"
-                            >
-                              Flag Issue
-                            </button>
-                            <button
-                              onClick={() => handleRowOverride(selectedTransaction.id, 'Needs Follow Up', selectedTransaction.reviewerNote || '')}
-                              className="py-1 px-2.5 bg-amber-500 hover:bg-amber-400 text-white rounded-lg text-3xs font-semibold"
-                            >
-                              Follow Up
-                            </button>
-                          </div>
+                          )}
                         </div>
                       )}
-
                     </div>
-                  )}
-
-                </div>
-
+                  </div>
+                )}
                 <div className="flex gap-2.5 pt-4 border-t border-slate-150 dark:border-slate-800">
                   <button
                     onClick={() => setActiveStep(5)}

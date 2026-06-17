@@ -75,6 +75,11 @@ export default function SimpleHomePage() {
         </p>
       </div>
 
+      {/* Start new check */}
+      <div className="space-y-1 border-b border-slate-100 dark:border-slate-800 pb-1">
+        <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">Start new check</h2>
+      </div>
+
       {/* Workflow Selection Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* DKV Card */}

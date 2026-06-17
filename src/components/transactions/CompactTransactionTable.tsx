@@ -118,11 +118,15 @@ export default function CompactTransactionTable({
     return <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />;
   };
 
-  const getGpsStatusBadge = (classification: string) => {
-    const cl = String(classification || '').toUpperCase();
+  const getGpsStatusBadge = (tx: any) => {
+    if (tx.telematicsOverrideStatus === 'Marked Supported') return 'bg-green-100 text-green-800 dark:bg-green-950/20 dark:text-green-400';
+    if (tx.telematicsOverrideStatus === 'Flagged Mismatch') return 'bg-rose-100 text-rose-800 dark:bg-rose-950/20 dark:text-rose-400';
+    if (tx.telematicsOverrideStatus === 'Needs Follow Up') return 'bg-amber-100 text-amber-800 dark:bg-amber-950/20 dark:text-amber-400';
+
+    const cl = String(tx.telematicsAssessment?.classification || 'INSUFFICIENT_EVIDENCE').toUpperCase();
     if (cl === 'VERIFIED') return 'bg-green-100 text-green-800 dark:bg-green-950/20 dark:text-green-400';
     if (cl === 'LIKELY') return 'bg-indigo-100 text-indigo-800 dark:bg-indigo-950/20 dark:text-indigo-400';
-    if (cl === 'REVIEW') return 'bg-amber-100 text-amber-800 dark:bg-amber-950/20 dark:text-amber-400';
+    if (cl === 'REVIEW' || cl === 'INSUFFICIENT_EVIDENCE') return 'bg-amber-100 text-amber-800 dark:bg-amber-950/20 dark:text-amber-400';
     if (cl === 'UNLIKELY') return 'bg-rose-100 text-rose-800 dark:bg-rose-950/20 dark:text-rose-400';
     return 'bg-gray-150 text-gray-600 dark:bg-gray-800 dark:text-gray-400';
   };
@@ -197,13 +201,13 @@ export default function CompactTransactionTable({
           <table className="w-full text-left border-collapse text-xs">
             <thead className="sticky top-0 z-20 bg-gray-50 dark:bg-gray-850 border-b border-gray-200 dark:border-gray-800 shadow-sm">
               <tr className="text-gray-500 dark:text-gray-400 font-semibold select-none">
-                <th className="w-8 px-2 py-2 text-center"></th>
+                {advancedMode && <th className="w-8 px-2 py-2 text-center"></th>}
                 <th className="px-3 py-2 w-12 text-center">Status</th>
-                <th className="px-3 py-2 min-w-[90px]">Date/Time</th>
+                <th className="px-3 py-2 min-w-[90px]">Time</th>
                 <th className="px-3 py-2 w-20">Vehicle</th>
                 {advancedMode && <th className="px-3 py-2 w-20">Source</th>}
                 <th className="px-3 py-2">Product</th>
-                <th className="px-3 py-2 min-w-[120px]">Location</th>
+                {advancedMode && <th className="px-3 py-2 min-w-[120px]">Location</th>}
                 <th className="px-3 py-2 text-right w-16">Qty</th>
                 <th className="px-3 py-2 text-right w-20">Net</th>
                 {advancedMode && <th className="px-3 py-2 text-right min-w-[90px]">VAT/Gross</th>}
@@ -223,14 +227,18 @@ export default function CompactTransactionTable({
                 const timezoneText = tx.sourceEvidence?.boundingBox ? 'UTC (STANDSTILL ALIGNED)' : 'UTC';
                 const hasGps = tx.sourceEvidence?.sourceType !== 'GPS_XLS';
 
-                const getGpsStatusText = (classification: string) => {
-                  if (advancedMode) return classification || 'NO GPS';
-                  const cl = String(classification || '').toUpperCase();
-                  if (cl === 'VERIFIED') return 'Verified';
-                  if (cl === 'LIKELY') return 'Likely';
+                const getGpsStatusText = (txItem: any) => {
+                  if (txItem.telematicsOverrideStatus === 'Marked Supported') return 'Supported';
+                  if (txItem.telematicsOverrideStatus === 'Flagged Mismatch') return 'Flagged';
+                  if (txItem.telematicsOverrideStatus === 'Needs Follow Up') return 'Needs review';
+
+                  if (advancedMode) return txItem.telematicsAssessment?.classification || 'NO GPS';
+                  const cl = String(txItem.telematicsAssessment?.classification || 'INSUFFICIENT_EVIDENCE').toUpperCase();
+                  if (cl === 'VERIFIED') return 'Supported';
+                  if (cl === 'LIKELY') return 'Likely supported';
                   if (cl === 'REVIEW' || cl === 'INSUFFICIENT_EVIDENCE') return 'Needs review';
                   if (cl === 'UNLIKELY') return 'Unlikely';
-                  return 'No GPS';
+                  return 'No GPS found';
                 };
 
                 return (
@@ -238,20 +246,24 @@ export default function CompactTransactionTable({
                     {/* Compact row */}
                     <tr
                       onClick={() => {
-                        toggleRow(tx.id);
+                        if (advancedMode) {
+                          toggleRow(tx.id);
+                        }
                         onSelectTransaction?.(tx);
                       }}
-                      className={`cursor-pointer border-b border-gray-150 dark:border-gray-850 hover:bg-gray-50/50 dark:hover:bg-gray-800/30 transition-colors density-row ${
+                      className={`cursor-pointer border-b border-gray-150 dark:border-gray-855 hover:bg-gray-50/50 dark:hover:bg-gray-800/30 transition-colors density-row ${
                         isExpanded ? 'bg-indigo-50/25 dark:bg-indigo-950/10' : ''
-                      } ${tx.isManuallyEdited ? 'border-l-2 border-l-amber-500 bg-amber-50/5 dark:bg-amber-950/5' : ''}`}
+                      } ${tx.isManuallyEdited ? 'border-l-2 border-l-amber-500 bg-amber-50/5 dark:bg-amber-955/5' : ''}`}
                     >
-                      <td className="px-2 py-2 text-center">
-                        {isExpanded ? (
-                          <ChevronUp className="w-3.5 h-3.5 text-gray-400" />
-                        ) : (
-                          <ChevronDown className="w-3.5 h-3.5 text-gray-400" />
-                        )}
-                      </td>
+                      {advancedMode && (
+                        <td className="px-2 py-2 text-center">
+                          {isExpanded ? (
+                            <ChevronUp className="w-3.5 h-3.5 text-gray-400" />
+                          ) : (
+                            <ChevronDown className="w-3.5 h-3.5 text-gray-400" />
+                          )}
+                        </td>
+                      )}
                       <td className="px-3 py-2 text-center" onClick={(e) => e.stopPropagation()}>
                         <div className="flex justify-center" title={tx.warnings?.join('\n') || tx.status}>
                           {getStatusIcon(tx.status)}
@@ -282,9 +294,11 @@ export default function CompactTransactionTable({
                       <td className="px-3 py-2 truncate max-w-[120px]" title={tx.productName}>
                         {tx.productName || tx.productType || '—'}
                       </td>
-                      <td className="px-3 py-2 truncate max-w-[140px]" title={tx.stationCity || tx.stationName}>
-                        {tx.stationCity || tx.stationName || '—'}
-                      </td>
+                      {advancedMode && (
+                        <td className="px-3 py-2 truncate max-w-[140px]" title={tx.stationCity || tx.stationName}>
+                          {tx.stationCity || tx.stationName || '—'}
+                        </td>
+                      )}
                       <td className="px-3 py-2 text-right font-mono font-semibold">
                         {parseFloat(tx.quantity || tx.volume || '0').toFixed(2)}{' '}
                         <span className="text-[10px] text-gray-400 font-normal">
@@ -314,16 +328,10 @@ export default function CompactTransactionTable({
                             <span
                               onClick={(e) => { e.stopPropagation(); onOpenEvidenceMatchView(tx); }}
                               className={`px-2 py-0.5 rounded-full text-[9px] font-bold cursor-pointer hover:opacity-85 ${
-                                getGpsStatusBadge(tx.telematicsAssessment?.classification || 'INSUFFICIENT_EVIDENCE')
+                                getGpsStatusBadge(tx)
                               }`}
                             >
-                              {getGpsStatusText(tx.telematicsAssessment?.classification || 'INSUFFICIENT_EVIDENCE')}
-                            </span>
-                            <span
-                              onClick={(e) => { e.stopPropagation(); onOpenEvidenceMatchView(tx); }}
-                              className="text-[8px] text-indigo-500 hover:underline cursor-pointer"
-                            >
-                              Compare
+                              {getGpsStatusText(tx)}
                             </span>
                           </div>
                         ) : (
@@ -355,56 +363,67 @@ export default function CompactTransactionTable({
                         </td>
                       )}
                       <td className="px-3 py-2 text-center sticky right-0 bg-white dark:bg-gray-900 border-l border-gray-150 dark:border-gray-850 z-10 shadow-[-4px_0_4px_-4px_rgba(0,0,0,0.1)]" onClick={(e) => e.stopPropagation()}>
-                        <div className="flex items-center gap-1.5 justify-center">
-                          {tx.sourceEvidence && (
-                            <SourcePreviewPopover
-                              evidence={tx.sourceEvidence}
-                              onOpenSource={() => onOpenSourceViewer(tx)}
+                        {advancedMode ? (
+                          <div className="flex items-center gap-1.5 justify-center">
+                            {tx.sourceEvidence && (
+                              <SourcePreviewPopover
+                                evidence={tx.sourceEvidence}
+                                onOpenSource={() => onOpenSourceViewer(tx)}
+                              >
+                                <button className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-indigo-500 hover:text-indigo-600 transition" title="Preview Source">
+                                  <FileText className="w-3.5 h-3.5" />
+                                </button>
+                              </SourcePreviewPopover>
+                            )}
+                            <button
+                              onClick={() => onOpenEvidenceMatchView(tx)}
+                              className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-emerald-500 hover:text-emerald-600 transition"
+                              title="Compare vs GPS"
                             >
-                              <button className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-indigo-500 hover:text-indigo-600 transition" title="Preview Source">
-                                <FileText className="w-3.5 h-3.5" />
+                              <GitCompare className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => onOpenManualGpsReview?.(tx)}
+                              className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-purple-500 hover:text-purple-600 transition"
+                              title="Manual GPS Review"
+                            >
+                              <Satellite className="w-3.5 h-3.5" />
+                            </button>
+                            {onOpenEdit && (
+                              <button
+                                onClick={() => onOpenEdit(tx)}
+                                className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-blue-500 hover:text-blue-600 transition"
+                                title="Edit Transaction"
+                              >
+                                <Edit className="w-3.5 h-3.5" />
                               </button>
-                            </SourcePreviewPopover>
-                          )}
-                          <button
-                            onClick={() => onOpenEvidenceMatchView(tx)}
-                            className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-emerald-500 hover:text-emerald-600 transition"
-                            title="Compare vs GPS"
-                          >
-                            <GitCompare className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            onClick={() => onOpenManualGpsReview?.(tx)}
-                            className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-purple-500 hover:text-purple-600 transition"
-                            title="Manual GPS Review"
-                          >
-                            <Satellite className="w-3.5 h-3.5" />
-                          </button>
-                          {onOpenEdit && (
+                            )}
+                            {tx.isManuallyEdited && onRevertEdit && (
+                              <button
+                                onClick={() => onRevertEdit(tx.id)}
+                                className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-rose-500 hover:text-rose-600 transition"
+                                title="Revert Manual Edits"
+                              >
+                                <Undo className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="flex justify-center">
                             <button
-                              onClick={() => onOpenEdit(tx)}
-                              className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-blue-500 hover:text-blue-600 transition"
-                              title="Edit Transaction"
+                              onClick={() => onSelectTransaction?.(tx)}
+                              className="px-3 py-1 bg-indigo-600 text-white hover:bg-indigo-500 rounded text-[10px] font-extrabold shadow-sm transition"
                             >
-                              <Edit className="w-3.5 h-3.5" />
+                              View
                             </button>
-                          )}
-                          {tx.isManuallyEdited && onRevertEdit && (
-                            <button
-                              onClick={() => onRevertEdit(tx.id)}
-                              className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-rose-500 hover:text-rose-600 transition"
-                              title="Revert Manual Edits"
-                            >
-                              <Undo className="w-3.5 h-3.5" />
-                            </button>
-                          )}
-                        </div>
+                          </div>
+                        )}
                       </td>
                     </tr>
                     {/* Inline detail expansion */}
                     {isExpanded && (
                       <tr className="bg-slate-50/40 dark:bg-black/10 border-b border-gray-150 dark:border-gray-800">
-                        <td colSpan={advancedMode ? 15 : 10} className="px-5 py-4">
+                        <td colSpan={advancedMode ? 15 : 8} className="px-5 py-4">
                           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-xs text-gray-600 dark:text-gray-400">
                             
                             {/* Col 1: Warnings & Details */}
