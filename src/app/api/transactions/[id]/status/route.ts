@@ -26,6 +26,9 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     if (body.reviewerNote !== undefined) {
       updatedData.reviewerNote = body.reviewerNote;
     }
+    if (body.manualGpsReview !== undefined) {
+      updatedData.manualGpsReview = body.manualGpsReview;
+    }
 
     const updated = db.update(table, id, updatedData);
     return NextResponse.json({ success: true, transaction: updated });

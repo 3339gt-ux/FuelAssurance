@@ -105,6 +105,7 @@ export async function GET(req: NextRequest) {
       beforePoint,
       afterPoint,
       station,
+      allVehiclePoints: allPoints,
     });
 
   } catch (err: any) {

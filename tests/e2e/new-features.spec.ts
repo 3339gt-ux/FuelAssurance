@@ -112,7 +112,7 @@ test.describe('New Audit Workspace and DKV PDF Ingest features', () => {
     
     // 10. Open Evidence Match View
     await row.locator('td').first().click();
-    const evidenceMatchBtn = page.locator('button', { hasText: 'Evidence Match' }).first();
+    const evidenceMatchBtn = page.locator('button[title="Compare vs GPS"]').first();
     await expect(evidenceMatchBtn).toBeVisible();
     await evidenceMatchBtn.click();
     
@@ -143,7 +143,7 @@ test.describe('New Audit Workspace and DKV PDF Ingest features', () => {
     await page.waitForURL(/\/batches\?id=.+/);
 
     // 5. Confirm DKV Invoice PDF detected
-    await expect(page.getByText('DKV Invoice PDF')).toBeVisible();
+    await expect(page.getByText('DKV Invoice PDF').first()).toBeVisible();
 
     // 6. Confirm sticky top action bar elements are visible
     const stickyBar = page.locator('div.sticky.top-0');

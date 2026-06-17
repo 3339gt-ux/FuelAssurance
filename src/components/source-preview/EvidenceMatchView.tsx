@@ -857,10 +857,10 @@ export default function EvidenceMatchView({
                     DECISION: {getGpsStatusText(manualStatus || assessment?.classification || 'INSUFFICIENT_EVIDENCE')}
                   </span>
                   <p className="leading-relaxed text-[11px] font-medium text-gray-800 dark:text-gray-200">
-                    {manualStatus
-                      ? `Manual Overruled decision status active: ${manualStatus.toUpperCase()}.`
-                      : assessment?.factors?.find((f: any) => f.dimension === 'FUEL_LEVEL_MOVEMENT')?.explanation ||
-                        'Location proximity verified near transaction time.'}
+                    <strong>Why:</strong> {manualStatus
+                      ? `Manual review note: ${reviewerNote || 'Supported override'}.`
+                      : assessment?.friendlyReason || assessment?.factors?.find((f: any) => f.dimension === 'FUEL_LEVEL_MOVEMENT')?.explanation ||
+                        'GPS file does not cover this transaction date/time.'}
                   </p>
                 </div>
 

@@ -21,6 +21,7 @@ interface CompactTransactionTableProps {
   transactions: any[];
   onOpenSourceViewer: (tx: any) => void;
   onOpenEvidenceMatchView: (tx: any) => void;
+  onOpenManualGpsReview?: (tx: any) => void;
   selectedVehicle?: string | null;
   advancedMode?: boolean;
   onSelectTransaction?: (tx: any) => void;
@@ -32,6 +33,7 @@ export default function CompactTransactionTable({
   transactions,
   onOpenSourceViewer,
   onOpenEvidenceMatchView,
+  onOpenManualGpsReview,
   selectedVehicle,
   advancedMode = false,
   onSelectTransaction,
@@ -370,6 +372,13 @@ export default function CompactTransactionTable({
                             title="Compare vs GPS"
                           >
                             <GitCompare className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={() => onOpenManualGpsReview?.(tx)}
+                            className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-purple-500 hover:text-purple-600 transition"
+                            title="Manual GPS Review"
+                          >
+                            <Satellite className="w-3.5 h-3.5" />
                           </button>
                           {onOpenEdit && (
                             <button
