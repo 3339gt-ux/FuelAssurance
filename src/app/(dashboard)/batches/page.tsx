@@ -1,5 +1,5 @@
 'use client';
-import React, { useState, useEffect, useCallback, Suspense } from 'react';
+import React, { useState, useEffect, useCallback, Suspense, useRef } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useDropzone } from 'react-dropzone';
 import {
@@ -123,6 +123,11 @@ function BatchesPageContent() {
   // Stepper workflow step: 1 (Upload) | 2 (Review Extracted) | 3 (Upload GPS) | 4 (Compare) | 5 (Approve/Flag)
   const [activeStep, setActiveStep] = useState<number>(1);
   const [selectedTransaction, setSelectedTransaction] = useState<any | null>(null);
+  const selectedTxRef = useRef(selectedTransaction);
+  useEffect(() => {
+    selectedTxRef.current = selectedTransaction;
+  }, [selectedTransaction]);
+
   const [selectedTxEvidence, setSelectedTxEvidence] = useState<any>(null);
   const [loadingEvidence, setLoadingEvidence] = useState(false);
   const [timeWindowMinutes, setTimeWindowMinutes] = useState<number>(30);
@@ -278,8 +283,9 @@ function BatchesPageContent() {
         setTransactions(enrichedTxs);
 
         // Keep selected transaction reference updated, or select first unresolved
-        if (selectedTransaction) {
-          const updatedTx = enrichedTxs.find((t: any) => t.id === selectedTransaction.id);
+        const currentSelectedTx = selectedTxRef.current;
+        if (currentSelectedTx) {
+          const updatedTx = enrichedTxs.find((t: any) => t.id === currentSelectedTx.id);
           if (updatedTx) setSelectedTransaction(updatedTx);
         } else if (enrichedTxs.length > 0) {
           const firstUnresolved = enrichedTxs.find((t: any) => 
@@ -302,7 +308,7 @@ function BatchesPageContent() {
     } finally {
       setLoadingBatchData(false);
     }
-  }, [selectedTransaction]);
+  }, []);
 
   // Synchronize workspace selection state with query parameters
   useEffect(() => {
@@ -1020,7 +1026,7 @@ function BatchesPageContent() {
             <div>
               <div className="flex items-center gap-2 text-xs font-semibold text-slate-550 dark:text-slate-400">
                 <span className="font-extrabold text-slate-900 dark:text-white text-sm">
-                  {activeBatch.provider} Statement
+                  {getFriendlySource(activeBatch)}
                 </span>
                 <span>·</span>
                 <span>{transactions.length} transactions</span>
@@ -1295,10 +1301,12 @@ function BatchesPageContent() {
                 onOpenEvidenceMatchView={(tx) => {
                   setSelectedTransaction(tx);
                   setSelectedTxForMatch(tx);
+                  setRightPanelTab('comparison');
                   setActiveStep(4); // navigate to comparison step
                 }}
                 onOpenManualGpsReview={(tx) => {
                   setSelectedTransaction(tx);
+                  setRightPanelTab('manual_review');
                   setActiveStep(4);
                   setShowManualGpsReview(true);
                 }}
@@ -1306,6 +1314,7 @@ function BatchesPageContent() {
                 advancedMode={advancedMode}
                 onSelectTransaction={(tx) => {
                   setSelectedTransaction(tx);
+                  setRightPanelTab('comparison');
                   if (activeStep !== 4) setActiveStep(4);
                 }}
                 onOpenEdit={handleOpenEdit}

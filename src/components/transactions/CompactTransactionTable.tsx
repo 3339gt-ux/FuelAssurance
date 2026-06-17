@@ -264,7 +264,7 @@ export default function CompactTransactionTable({
                           )}
                         </td>
                       )}
-                      <td className="px-3 py-2 text-center" onClick={(e) => e.stopPropagation()}>
+                      <td className="px-3 py-2 text-center">
                         <div className="flex justify-center" title={tx.warnings?.join('\n') || tx.status}>
                           {getStatusIcon(tx.status)}
                         </div>
